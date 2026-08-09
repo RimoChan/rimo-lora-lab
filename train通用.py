@@ -1,7 +1,9 @@
 import os
 import time
+import json
 import logging
 import itertools
+from pathlib import Path
 
 import fire
 import requests
@@ -22,7 +24,7 @@ from diffusers.utils import convert_state_dict_to_diffusers, convert_unet_state_
 from diffusers.utils.torch_utils import is_compiled_module
 
 from compel import Compel, ReturnedEmbeddingsType
-from common import cycle, clean, 生成optimizer, 哈, encode_prompt, 读取数据集, compute_time_ids, 检查模型类型, 计时, buffered_iterator
+from common import cycle, clean, 生成optimizer, 哈, encode_prompt, 读取数据集, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg
 
 
 def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet, torch_dtype, trackers, pretrained_model_name_or_path, validation_prompt_list):
@@ -57,8 +59,7 @@ def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet
             clean()
             for tracker in trackers:
                 if tracker.name == "tensorboard":
-                    np_images = np.stack([np.asarray(img) for img in images])
-                    tracker.writer.add_images("validation", np_images, global_step, dataformats="NHWC")
+                    add_image_jpeg(tracker.writer, "validation", np.concatenate([np.asarray(img) for img in images], axis=1), global_step)
 
 
 def 加载模型(path) -> tuple:
@@ -101,11 +102,23 @@ def conditional_loss( model_pred: torch.Tensor, target: torch.Tensor, reduction:
     return loss
 
 
+def vae_encode_with_cache(vae, pixel_values, cache_dir, 哈希值) -> torch.Tensor:
+    import pickle
+    p = Path(cache_dir) / f'{哈希值}.pkl'
+    if p.exists():
+        return pickle.load(open(p, 'rb'))
+    res = vae.encode(pixel_values.to('cuda')).latent_dist.sample() * vae.config.scaling_factor
+    with open(p, 'wb') as f:
+        pickle.dump(res, f)
+    return res
+
+
 def main(
     pretrained_model_name_or_path: str,
     validation_prompt_list: list[str],
     pretrained_cross_model_path: str = None,
     train_data_dir: str = None,
+    cache_dir: str = './rimo_trainer_cache',
     regular_train_data_dir: str = None,
     validation_steps: int = 100,
     output_dir: str = "lora",
@@ -117,7 +130,7 @@ def main(
     gradient_accumulation_steps: int = 1,
     gradient_checkpointing: bool = False,
     lr: float = 1e-4,
-    lr_scheduler: str = "constant",
+    lr_scheduler: str = "constant_with_warmup",
     lr_warmup_steps: int = 500,
     snr_gamma: float = None,
     optimizer: str = "adam",
@@ -131,12 +144,14 @@ def main(
     loss_type: str = "l2",
     huber_c: float = 0.1,
     rank: int = 32,
-    alpha: int = 16,
+    alpha: int = None,
     time_min: int = 0,
     time_max: int = 1000,
     drop_tag_rate: float = 0.0,
     swap_every_n_steps: int = 8,
+    resume_from_checkpoint: str = 'latest',
 ):
+    metadata = {k: v for k, v in locals().items() if isinstance(v, (float, int, str)) and not k.startswith('_')}
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
@@ -152,7 +167,7 @@ def main(
     if accelerator.is_main_process:
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
-
+    alpha = alpha or rank // 2
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -215,8 +230,7 @@ def main(
         unet_state_dict = {f"{k.replace('unet.', '')}": v for k, v in lora_state_dict.items() if k.startswith("unet.")}
         unet_state_dict = convert_unet_state_dict_to_peft(unet_state_dict)
         incompatible_keys = set_peft_model_state_dict(unet_, unet_state_dict, adapter_name="default")
-        assert not incompatible_keys
-
+        assert not incompatible_keys or not incompatible_keys.unexpected_keys, f'不对，{incompatible_keys.unexpected_keys}'
         # Make sure the trainable params are in float32. This is again needed since the base models
         # are in `weight_dtype`. More details:
         # https://github.com/huggingface/diffusers/pull/6514#discussion_r1449796804
@@ -254,17 +268,26 @@ def main(
     if accelerator.is_main_process:
         accelerator.init_trackers(特征)
     checkpoint_dir = os.path.join(output_dir, 特征)
-
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    with open(Path(checkpoint_dir) / 'metadata.json', 'w', encoding='utf8') as f:
+        json.dump(metadata, f, indent=2)
     global_step = 0
+    if resume_from_checkpoint == 'latest':
+        if 候选checkpoint := [*Path(checkpoint_dir).glob('checkpoint-*')]:
+            resume_from_checkpoint = str(max(候选checkpoint, key=lambda i: int(i.stem.split('-')[-1])))
+        else:
+            resume_from_checkpoint = None
+    if resume_from_checkpoint:
+        accelerator.load_state(resume_from_checkpoint)
+        global_step = int(resume_from_checkpoint.split("-")[-1])
 
     progress_bar = tqdm(
         range(0, max_train_steps),
-        initial=0,
+        initial=global_step,
         desc="Steps",
         disable=not accelerator.is_local_main_process,
     )
-
-    train_dataloader_cycle = buffered_iterator(读取数据集(train_data_dir))
+    源 = buffered_iterator(读取数据集(train_data_dir))
 
     unet.train()
     train_loss = 0.0
@@ -277,15 +300,15 @@ def main(
             else:
                 相位转移(base_model_to_swap, unet_a_state_dict_cpu)
             current_model_is_a = not current_model_is_a
-        batch = next(train_dataloader_cycle)
+        batch = next(源)
         with accelerator.accumulate(unet), 计时(accelerator, global_step, '全', sync=True):
-            pixel_values = batch["pixel_values"]
             h, w = batch['pixel_values'].shape[2:]
             with 计时(accelerator, global_step, 'VAE', sync=True):
-                model_input = (vae.encode(pixel_values.to('cuda')).latent_dist.sample() * vae.config.scaling_factor).to(weight_dtype)
+                model_input = vae_encode_with_cache(vae, batch["pixel_values"], cache_dir, batch["image_hash"]).to(weight_dtype)
             noise = torch.randn_like(model_input)
             bsz = model_input.shape[0]
-            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device).long()
+
+            timesteps = torch.randint(time_min, time_max, (bsz,), device=model_input.device).long()
 
             noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps)    # 100接近model_input，800接近noise
 

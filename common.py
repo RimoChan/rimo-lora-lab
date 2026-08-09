@@ -238,7 +238,9 @@ def 读取数据集(p: str):
     while True:
         random.shuffle(a)
         for img_path, txt_path in a:
-            pixel_values = transform(Image.open(img_path).convert('RGB'))
+            img_bytes = img_path.read_bytes()
+            img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+            pixel_values = transform(img)
             s = txt_path.read_text(encoding='utf-8')
             if True:
                 新sa = s.split(', ')
@@ -247,4 +249,5 @@ def 读取数据集(p: str):
             yield {
                 'pixel_values': pixel_values.unsqueeze(0),
                 'prompts': [新s],
+                'image_hash': hashlib.sha256(img_bytes).hexdigest()[:8]+'_'.join(map(str,pixel_values.shape)),
             }
