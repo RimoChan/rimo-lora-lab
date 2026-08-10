@@ -210,18 +210,16 @@ def cosine_with_restart_scheduler改(
     )
 
 
-def random_scale(img, min_size=704, max_size=1280):
-    w, h = img.size
-    current_avg = (w + h) / 2.0
-    target_avg = random.randint(min_size, max_size)
-    scale_factor = target_avg / current_avg
-    new_w = int(w * scale_factor)
-    new_h = int(h * scale_factor)
-    return img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+def 读取数据集(p: str, drop_tag_rate, drop_text_rate, size_min, size_max, image_exts={'.jpg', '.jpeg', '.png', '.bmp', '.webp'}):
+    def random_scale(img):
+        w, h = img.size
+        current_avg = (w + h) / 2.0
+        target_avg = random.randint(size_min, size_max)
+        scale_factor = target_avg / current_avg
+        new_w = int(w * scale_factor)
+        new_h = int(h * scale_factor)
+        return img.resize((new_w, new_h), Image.Resampling.BICUBIC)
 
-
-def 读取数据集(p: str):
-    image_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
     transform = transforms.Compose([
         transforms.Lambda(random_scale),
         transforms.Lambda(lambda x: x.crop((0, 0, x.width // 16 * 16, x.height // 16 * 16))),
@@ -244,8 +242,12 @@ def 读取数据集(p: str):
             s = txt_path.read_text(encoding='utf-8')
             if True:
                 新sa = s.split(', ')
+                if drop_tag_rate > 0:
+                    新sa = random.sample(新sa, round(len(新sa) * (1 - drop_tag_rate)))
                 random.shuffle(新sa)
                 新s = ', '.join(新sa)
+                if random.random() < drop_text_rate:
+                    新s = ''
             yield {
                 'pixel_values': pixel_values.unsqueeze(0),
                 'prompts': [新s],

@@ -125,7 +125,7 @@ def main(
     seed: int = None,
     batch_size: int = 16,
     max_train_steps: int = 10000,
-    lr_num_cycles: int = 10,
+    cycle_steps: int = 3000,
     checkpointing_steps: int = 500,
     gradient_accumulation_steps: int = 1,
     gradient_checkpointing: bool = False,
@@ -147,10 +147,16 @@ def main(
     alpha: int = None,
     time_min: int = 0,
     time_max: int = 1000,
+    size_min: int = 704,
+    size_max: int = 1280,
     drop_tag_rate: float = 0.0,
+    drop_text_rate: float = 0.0,
     swap_every_n_steps: int = 8,
     resume_from_checkpoint: str = 'latest',
 ):
+    alpha = alpha or rank // 2
+    if seed is None:
+        seed = int(time.time()) % 1000
     metadata = {k: v for k, v in locals().items() if isinstance(v, (float, int, str)) and not k.startswith('_')}
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -159,15 +165,12 @@ def main(
         project_config=ProjectConfiguration(project_dir=output_dir, logging_dir=os.path.join(output_dir, 'logs')),
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)],
     )
-    if seed is None:
-        seed = time.time()
     set_seed(seed)
     if isinstance(validation_prompt_list, str):
         validation_prompt_list = validation_prompt_list.split(';')
     if accelerator.is_main_process:
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
-    alpha = alpha or rank // 2
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -244,12 +247,12 @@ def main(
     if gradient_checkpointing:
         unet.enable_gradient_checkpointing()
 
-
     if mixed_precision == "fp16":
         models = [unet]
         cast_training_params(models, dtype=torch.float32)
 
-    特征 = f'{哈(train_data_dir)}-{哈(pretrained_model_name_or_path)}-{optimizer}-snr{snr_gamma}-lr{lr}-drop{drop_tag_rate}-{mixed_precision}-{lr_scheduler}-lora{rank}_{alpha}-time{time_min}_{time_max}-decay{adam_weight_decay}' + f'-X_{哈(pretrained_cross_model_path)}' * bool(pretrained_cross_model_path)
+    特 = [哈(train_data_dir), 哈(pretrained_model_name_or_path), optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', f'X_{哈(pretrained_cross_model_path)}' * bool(pretrained_cross_model_path)]
+    特征 = '-'.join([str(i) for i in 特 if i != ''])
 
     optimizer = 生成optimizer(optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, lr, lr * 20)
 
@@ -257,8 +260,8 @@ def main(
         lr_scheduler,
         optimizer=optimizer,
         num_warmup_steps=lr_warmup_steps * gradient_accumulation_steps,
-        num_training_steps=max_train_steps * gradient_accumulation_steps,
-        num_cycles=lr_num_cycles,
+        num_training_steps=max_train_steps * gradient_accumulation_steps * 1000,
+        num_cycles=round(max_train_steps * gradient_accumulation_steps * 1000 / cycle_steps),
     )
 
     unet, optimizer, lr_scheduler = accelerator.prepare(
@@ -287,7 +290,7 @@ def main(
         desc="Steps",
         disable=not accelerator.is_local_main_process,
     )
-    源 = buffered_iterator(读取数据集(train_data_dir))
+    源 = buffered_iterator(读取数据集(train_data_dir, drop_tag_rate=drop_tag_rate, drop_text_rate=drop_text_rate, size_min=size_min, size_max=size_max))
 
     unet.train()
     train_loss = 0.0
