@@ -7,13 +7,11 @@ import hashlib
 import threading
 import contextlib
 from queue import Queue
-from pathlib import Path
 from typing import Optional
 
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import Optimizer
-from torchvision import transforms
 from tqdm import tqdm
 from PIL import Image
 from tensorboard.compat.proto import summary_pb2
@@ -208,48 +206,3 @@ def cosine_with_restart_scheduler改(
         num_cycles=num_cycles,
         last_epoch=last_epoch,
     )
-
-
-def 读取数据集(p: str, drop_tag_rate, drop_text_rate, size_min, size_max, image_exts={'.jpg', '.jpeg', '.png', '.bmp', '.webp'}):
-    def random_scale(img):
-        w, h = img.size
-        current_avg = (w + h) / 2.0
-        target_avg = random.randint(size_min, size_max)
-        scale_factor = target_avg / current_avg
-        new_w = int(w * scale_factor)
-        new_h = int(h * scale_factor)
-        return img.resize((new_w, new_h), Image.Resampling.BICUBIC)
-
-    transform = transforms.Compose([
-        transforms.Lambda(random_scale),
-        transforms.Lambda(lambda x: x.crop((0, 0, x.width // 16 * 16, x.height // 16 * 16))),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
-    ])
-    a = []
-    for img_path in Path(p).iterdir():
-        if img_path.suffix.lower() in image_exts:
-            txt_path = img_path.with_suffix('.txt')
-            if txt_path.exists():
-                a.append((img_path, txt_path))
-    print(f'找到了{len(a)}个对！')
-    while True:
-        random.shuffle(a)
-        for img_path, txt_path in a:
-            img_bytes = img_path.read_bytes()
-            img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-            pixel_values = transform(img)
-            s = txt_path.read_text(encoding='utf-8')
-            if True:
-                新sa = s.split(', ')
-                if drop_tag_rate > 0:
-                    新sa = random.sample(新sa, round(len(新sa) * (1 - drop_tag_rate)))
-                random.shuffle(新sa)
-                新s = ', '.join(新sa)
-                if random.random() < drop_text_rate:
-                    新s = ''
-            yield {
-                'pixel_values': pixel_values.unsqueeze(0),
-                'prompts': [新s],
-                'image_hash': hashlib.sha256(img_bytes).hexdigest()[:8]+'_'.join(map(str,pixel_values.shape)),
-            }

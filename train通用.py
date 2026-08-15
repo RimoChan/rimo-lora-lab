@@ -5,6 +5,8 @@ import logging
 import itertools
 from pathlib import Path
 
+from typing import Any
+
 import fire
 import requests
 import numpy as np
@@ -24,7 +26,8 @@ from diffusers.utils import convert_state_dict_to_diffusers, convert_unet_state_
 from diffusers.utils.torch_utils import is_compiled_module
 
 from compel import Compel, ReturnedEmbeddingsType
-from common import cycle, clean, 生成optimizer, 哈, encode_prompt, 读取数据集, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg
+from common import cycle, clean, 生成optimizer, 哈, encode_prompt, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg
+from data import 读取数据集
 
 
 def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet, torch_dtype, trackers, pretrained_model_name_or_path, validation_prompt_list):
@@ -118,9 +121,10 @@ def main(
     validation_prompt_list: list[str],
     pretrained_cross_model_path: str = None,
     train_data_dir: str = None,
-    cache_dir: str = './rimo_trainer_cache',
-    regular_train_data_dir: str = None,
+    prior_loss_train_data_dir: str = None,
+    cache_dir: str = './rimo_lora_lab_cache',
     validation_steps: int = 100,
+    prior_loss_steps: int = 8,
     output_dir: str = "lora",
     seed: int = None,
     batch_size: int = 16,
@@ -151,6 +155,10 @@ def main(
     size_max: int = 1280,
     drop_tag_rate: float = 0.0,
     drop_text_rate: float = 0.0,
+    shuffle_tag: bool = False,
+    prior_loss_shuffle_tag: bool = False,
+    prompt_post_process: str = '',
+    prompt_post_process_arg: Any = None,
     swap_every_n_steps: int = 8,
     resume_from_checkpoint: str = 'latest',
 ):
@@ -251,7 +259,7 @@ def main(
         models = [unet]
         cast_training_params(models, dtype=torch.float32)
 
-    特 = [哈(train_data_dir), 哈(pretrained_model_name_or_path), optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', f'X_{哈(pretrained_cross_model_path)}' * bool(pretrained_cross_model_path)]
+    特 = [哈(train_data_dir), 哈(pretrained_model_name_or_path), f'{哈(prior_loss_train_data_dir)}_p{prior_loss_steps}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', f'X_{哈(pretrained_cross_model_path)}' * bool(pretrained_cross_model_path), prompt_post_process, f'sf_{"FT"[shuffle_tag]}_{"FT"[prior_loss_shuffle_tag]}']
     特征 = '-'.join([str(i) for i in 特 if i != ''])
 
     optimizer = 生成optimizer(optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, lr, lr * 20)
@@ -290,7 +298,10 @@ def main(
         desc="Steps",
         disable=not accelerator.is_local_main_process,
     )
-    源 = buffered_iterator(读取数据集(train_data_dir, drop_tag_rate=drop_tag_rate, drop_text_rate=drop_text_rate, size_min=size_min, size_max=size_max))
+
+    源 = buffered_iterator(读取数据集(train_data_dir, shuffle_tag=shuffle_tag, drop_tag_rate=drop_tag_rate, drop_text_rate=drop_text_rate, size_min=size_min, size_max=size_max, prompt_post_process=prompt_post_process, prompt_post_process_arg=prompt_post_process_arg))
+    if prior_loss_train_data_dir:
+        源p = buffered_iterator(读取数据集(prior_loss_train_data_dir, shuffle_tag=prior_loss_shuffle_tag, size_min=size_min, size_max=size_max))
 
     unet.train()
     train_loss = 0.0
@@ -303,20 +314,32 @@ def main(
             else:
                 相位转移(base_model_to_swap, unet_a_state_dict_cpu)
             current_model_is_a = not current_model_is_a
-        batch = next(源)
-        with accelerator.accumulate(unet), 计时(accelerator, global_step, '全', sync=True):
-            h, w = batch['pixel_values'].shape[2:]
+        在训练正则化 = bool(prior_loss_train_data_dir and (global_step % prior_loss_steps == prior_loss_steps - 1))
+        if 在训练正则化:
+            batch = next(源p)
+        else:
+            batch = next(源)
+        try:
             with 计时(accelerator, global_step, 'VAE', sync=True):
                 model_input = vae_encode_with_cache(vae, batch["pixel_values"], cache_dir, batch["image_hash"]).to(weight_dtype)
+            prompt_embeds, pooled_prompt_embeds = encode_prompt(batch['prompts'], compel)
+        except Exception:
+            logging.exception('准备输入时出了问题:')
+            continue
+        if global_step < 10 and not 在训练正则化:
+            with open(f'{checkpoint_dir}/prompt_log.txt', 'a') as f:
+                print('\n'.join(['-'*9, batch['raw_prompts'][0], batch['prompts'][0]]), file=f)
+        with accelerator.accumulate(unet), 计时(accelerator, global_step, '全', sync=True):
+            h, w = batch['pixel_values'].shape[2:]
             noise = torch.randn_like(model_input)
             bsz = model_input.shape[0]
-
-            timesteps = torch.randint(time_min, time_max, (bsz,), device=model_input.device).long()
+            if 在训练正则化:
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device)
+            else:
+                timesteps = torch.randint(time_min, time_max, (bsz,), device=model_input.device).long()
 
             noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps)    # 100接近model_input，800接近noise
-
             add_time_ids = torch.cat([compute_time_ids(s, r, c) for s, r, c in zip([(h, w)], [(h, w)], [(0, 0)])]).to('cuda')
-            prompt_embeds, pooled_prompt_embeds = encode_prompt(batch['prompts'], compel)
             unet_added_conditions = {"time_ids": add_time_ids}
             unet_added_conditions.update({"text_embeds": pooled_prompt_embeds})
 
@@ -328,14 +351,28 @@ def main(
                 return_dict=False,
             )[0]
 
-            if prediction_type is not None:
-                noise_scheduler.register_to_config(prediction_type=prediction_type)
-            if noise_scheduler.config.prediction_type == "epsilon":
-                target = noise
-            elif noise_scheduler.config.prediction_type == "v_prediction":
-                target = noise_scheduler.get_velocity(model_input, noise, timesteps)
+
+            if 在训练正则化:
+                with torch.inference_mode():
+                    unet.disable_adapters()
+                    原model_pred = unet(
+                        noisy_model_input,
+                        timesteps,
+                        prompt_embeds,
+                        added_cond_kwargs=unet_added_conditions,
+                        return_dict=False,
+                    )[0]
+                    unet.enable_adapters()
+                    target = 原model_pred.detach().clone()
             else:
-                raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                if prediction_type is not None:
+                    noise_scheduler.register_to_config(prediction_type=prediction_type)
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    target = noise
+                elif noise_scheduler.config.prediction_type == "v_prediction":
+                    target = noise_scheduler.get_velocity(model_input, noise, timesteps)
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
             if snr_gamma is None:
                 loss = conditional_loss(
@@ -382,12 +419,13 @@ def main(
                     pretrained_model_name_or_path=pretrained_model_name_or_path,
                     validation_prompt_list=validation_prompt_list,
                 )
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "grad_norm": grad_norm.item(), "t": timesteps[0]}
+            前缀 = '正则化' * 在训练正则化
+            logs = {f"{前缀}loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], f"{前缀}grad_norm": grad_norm.item(), f"{前缀}t": timesteps[0]}
             for a, b in itertools.pairwise([1000, 900, 800, 0]):
                 if a >= timesteps[0] >= b:
                     logs = logs | {
-                        f'grad_norm_{a}到{b}': grad_norm.item(),
-                        f'loss_{a}到{b}': train_loss,
+                        f'{前缀}grad_norm_{a}到{b}': grad_norm.item(),
+                        f'{前缀}loss_{a}到{b}': train_loss,
                     }
                     accelerator.log(logs, step=global_step)
                     break
