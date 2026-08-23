@@ -16,6 +16,7 @@ from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
 from peft import LoraConfig, set_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
+from PIL import ImageDraw, ImageFont
 from tqdm.auto import tqdm
 
 from diffusers import DDPMScheduler, StableDiffusionXLPipeline, DPMSolverMultistepScheduler
@@ -26,11 +27,11 @@ from diffusers.utils import convert_state_dict_to_diffusers, convert_unet_state_
 from diffusers.utils.torch_utils import is_compiled_module
 
 from compel import Compel, ReturnedEmbeddingsType
-from common import cycle, clean, 生成optimizer, 哈, encode_prompt, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg
+from common import cycle, clean, 生成optimizer, 哈, 哈哈, encode_prompt, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg
 from data import 读取数据集
 
 
-def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet, torch_dtype, trackers, pretrained_model_name_or_path, validation_prompt_list):
+def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet, torch_dtype, trackers, pretrained_model_name_or_path, validation_prompt_list, current_model_index):
     if accelerator.is_main_process:
         with torch.inference_mode():
             for _ in range(1000):
@@ -48,6 +49,7 @@ def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet
                     print('网络不好，休息1下！', repr(e))
                     time.sleep(30)
             pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config)
+            pipeline.set_progress_bar_config(disable=True)
             clean()
             images = [
                 pipeline(
@@ -60,6 +62,7 @@ def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet
                 ).images[0] for i, prompt in enumerate(validation_prompt_list)
             ]
             clean()
+            ImageDraw.Draw(images[0]).text((10, 10), str(current_model_index), fill="red", font=ImageFont.load_default(128))
             for tracker in trackers:
                 if tracker.name == "tensorboard":
                     add_image_jpeg(tracker.writer, "validation", np.concatenate([np.asarray(img) for img in images], axis=1), global_step)
@@ -117,11 +120,10 @@ def vae_encode_with_cache(vae, pixel_values, cache_dir, 哈希值) -> torch.Tens
 
 
 def main(
-    pretrained_model_name_or_path: str,
-    validation_prompt_list: list[str],
-    pretrained_cross_model_path: str = None,
-    train_data_dir: str = None,
-    prior_loss_train_data_dir: str = None,
+    pretrained_model_name_or_path: str | list[str],
+    validation_prompt_list: str | list[str],
+    train_data_dir: str | list[str],
+    prior_loss_train_data_dir: str | list[str] = None,
     cache_dir: str = './rimo_lora_lab_cache',
     validation_steps: int = 100,
     prior_loss_steps: int = 8,
@@ -159,12 +161,16 @@ def main(
     prior_loss_shuffle_tag: bool = False,
     prompt_post_process: str = '',
     prompt_post_process_arg: Any = None,
+    prior_loss_prompt_post_process: str = '',
+    prior_loss_prompt_post_process_arg: Any = None,
     swap_every_n_steps: int = 8,
     resume_from_checkpoint: str = 'latest',
+    use_mask: bool = False,
+    mask_min: float = 0.1,
 ):
     alpha = alpha or rank // 2
     if seed is None:
-        seed = int(time.time()) % 1000
+        seed = int(time.time()) % 100
     metadata = {k: v for k, v in locals().items() if isinstance(v, (float, int, str)) and not k.startswith('_')}
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -174,8 +180,14 @@ def main(
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)],
     )
     set_seed(seed)
+    if isinstance(pretrained_model_name_or_path, str):
+        pretrained_model_name_or_path = pretrained_model_name_or_path.split(';')
     if isinstance(validation_prompt_list, str):
         validation_prompt_list = validation_prompt_list.split(';')
+    if isinstance(train_data_dir, str):
+        train_data_dir = train_data_dir.split(';')
+    if isinstance(prior_loss_train_data_dir, str):
+        prior_loss_train_data_dir = prior_loss_train_data_dir.split(';')
     if accelerator.is_main_process:
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
@@ -185,12 +197,13 @@ def main(
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    text_encoder_one, text_encoder_two, compel, unet, vae, noise_scheduler = 加载模型(pretrained_model_name_or_path)
-    if pretrained_cross_model_path:
-        unet_b = 加载模型(pretrained_cross_model_path)[3]
-        unet_a_state_dict_cpu = unet.to('cpu', dtype=weight_dtype).state_dict()
-        unet_b_state_dict_cpu = unet_b.to('cpu', dtype=weight_dtype).state_dict()
-        del unet_b
+    text_encoder_one, text_encoder_two, compel, unet, vae, noise_scheduler = 加载模型(pretrained_model_name_or_path[0])
+    if len(pretrained_model_name_or_path) > 1:
+        unet_state_dicts = [unet.to('cpu', dtype=weight_dtype).state_dict()]
+        for p in pretrained_model_name_or_path[1:]:
+            other_unet = 加载模型(p)[3]
+            unet_state_dicts.append(other_unet.to('cpu', dtype=weight_dtype).state_dict())
+            del other_unet
 
     unet.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=torch.float32)
@@ -259,7 +272,7 @@ def main(
         models = [unet]
         cast_training_params(models, dtype=torch.float32)
 
-    特 = [哈(train_data_dir), 哈(pretrained_model_name_or_path), f'{哈(prior_loss_train_data_dir)}_p{prior_loss_steps}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', f'X_{哈(pretrained_cross_model_path)}' * bool(pretrained_cross_model_path), prompt_post_process, f'sf_{"FT"[shuffle_tag]}_{"FT"[prior_loss_shuffle_tag]}']
+    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_steps}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', prompt_post_process, prior_loss_prompt_post_process, f'sf_{"FT"[shuffle_tag]}_{"FT"[prior_loss_shuffle_tag]}', f'mask{mask_min}' * use_mask, seed]
     特征 = '-'.join([str(i) for i in 特 if i != ''])
 
     optimizer = 生成optimizer(optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, lr, lr * 20)
@@ -299,21 +312,22 @@ def main(
         disable=not accelerator.is_local_main_process,
     )
 
-    源 = buffered_iterator(读取数据集(train_data_dir, shuffle_tag=shuffle_tag, drop_tag_rate=drop_tag_rate, drop_text_rate=drop_text_rate, size_min=size_min, size_max=size_max, prompt_post_process=prompt_post_process, prompt_post_process_arg=prompt_post_process_arg))
+    源 = buffered_iterator(itertools.chain.from_iterable(zip(*[
+        读取数据集(i, shuffle_tag=shuffle_tag, drop_tag_rate=drop_tag_rate, drop_text_rate=drop_text_rate, size_min=size_min, size_max=size_max, prompt_post_process=prompt_post_process, prompt_post_process_arg=prompt_post_process_arg, use_mask=use_mask)
+        for i in train_data_dir
+    ])))
     if prior_loss_train_data_dir:
-        源p = buffered_iterator(读取数据集(prior_loss_train_data_dir, shuffle_tag=prior_loss_shuffle_tag, size_min=size_min, size_max=size_max))
-
+        源p = buffered_iterator(itertools.chain.from_iterable(zip(*[
+            读取数据集(i, shuffle_tag=prior_loss_shuffle_tag, size_min=size_min, size_max=size_max, prompt_post_process=prior_loss_prompt_post_process, prompt_post_process_arg=prior_loss_prompt_post_process_arg)
+            for i in prior_loss_train_data_dir
+        ])))
     unet.train()
-    train_loss = 0.0
-    current_model_is_a = True
+    current_model_index = 0
     while global_step <= max_train_steps:
-        if pretrained_cross_model_path and global_step > 0 and global_step % swap_every_n_steps == 0:
-            base_model_to_swap = unet
-            if current_model_is_a:
-                相位转移(base_model_to_swap, unet_b_state_dict_cpu)
-            else:
-                相位转移(base_model_to_swap, unet_a_state_dict_cpu)
-            current_model_is_a = not current_model_is_a
+        if len(pretrained_model_name_or_path) > 1 and global_step > 0 and global_step % swap_every_n_steps == 0:
+            current_model_index = (current_model_index + 1) % len(pretrained_model_name_or_path)
+            with 计时(accelerator, global_step, '相位转移', sync=True):
+                相位转移(unet, unet_state_dicts[current_model_index])
         在训练正则化 = bool(prior_loss_train_data_dir and (global_step % prior_loss_steps == prior_loss_steps - 1))
         if 在训练正则化:
             batch = next(源p)
@@ -326,9 +340,9 @@ def main(
         except Exception:
             logging.exception('准备输入时出了问题:')
             continue
-        if global_step < 10 and not 在训练正则化:
-            with open(f'{checkpoint_dir}/prompt_log.txt', 'a') as f:
-                print('\n'.join(['-'*9, batch['raw_prompts'][0], batch['prompts'][0]]), file=f)
+        if global_step < 100:
+            with open(f'{checkpoint_dir}/prompt_log.txt', 'a', encoding='utf8') as f:
+                print('\n'.join(['-'*9, f'{在训练正则化=}', batch['raw_prompts'][0], batch['prompts'][0]]), file=f)
         with accelerator.accumulate(unet), 计时(accelerator, global_step, '全', sync=True):
             h, w = batch['pixel_values'].shape[2:]
             noise = torch.randn_like(model_input)
@@ -376,8 +390,13 @@ def main(
 
             if snr_gamma is None:
                 loss = conditional_loss(
-                    model_pred.float(), target.float(), reduction="mean", loss_type=loss_type, huber_c=huber_c
+                    model_pred.float(), target.float(), reduction="none", loss_type=loss_type, huber_c=huber_c
                 )
+                if use_mask and batch.get('pixel_values_mask') is not None:
+                    x, y = batch["pixel_values_mask"].shape[-2:]
+                    mask = F.interpolate(batch['pixel_values_mask'].to(accelerator.device, dtype=torch.float32), size=(x//8, y//8))
+                    mask = mask * (1 - mask_min) + mask_min
+                    loss = loss * mask
             else:
                 # Compute loss-weights as per Section 3.4 of https://huggingface.co/papers/2303.09556.
                 # Since we predict the noise instead of x_0, the original formulation is slightly changed.
@@ -391,12 +410,12 @@ def main(
                 loss = conditional_loss(
                     model_pred.float(), target.float(), reduction="none", loss_type=loss_type, huber_c=huber_c
                 )
+                if use_mask and batch.get('pixel_values_mask') is not None:
+                    mask = F.interpolate(batch['pixel_values_mask'].to(accelerator.device, dtype=torch.float32), size=model_pred.shape[-2:])
+                    mask = mask * (1 - mask_min) + mask_min
+                    loss = loss * mask
                 loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
-                loss = loss.mean()
-
-            avg_loss = accelerator.gather(loss.repeat(batch_size)).mean()
-            train_loss += avg_loss.item() / gradient_accumulation_steps
-
+            loss = loss.mean()
             accelerator.backward(loss)
             if accelerator.sync_gradients:
                 grad_norm = accelerator.clip_grad_norm_([*filter(lambda p: p.requires_grad, unet.parameters())], max_grad_norm)
@@ -416,8 +435,9 @@ def main(
                     torch_dtype=weight_dtype,
                     trackers=accelerator.trackers,
                     global_step=global_step,
-                    pretrained_model_name_or_path=pretrained_model_name_or_path,
+                    pretrained_model_name_or_path=pretrained_model_name_or_path[0],
                     validation_prompt_list=validation_prompt_list,
+                    current_model_index=current_model_index,
                 )
             前缀 = '正则化' * 在训练正则化
             logs = {f"{前缀}loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], f"{前缀}grad_norm": grad_norm.item(), f"{前缀}t": timesteps[0]}
@@ -425,13 +445,12 @@ def main(
                 if a >= timesteps[0] >= b:
                     logs = logs | {
                         f'{前缀}grad_norm_{a}到{b}': grad_norm.item(),
-                        f'{前缀}loss_{a}到{b}': train_loss,
+                        f'{前缀}loss_{a}到{b}': loss.item(),
                     }
                     accelerator.log(logs, step=global_step)
                     break
             progress_bar.update(1)
             global_step += 1
-            train_loss = 0.0
             if accelerator.is_main_process and global_step % checkpointing_steps == 0:
                 save_path = os.path.join(checkpoint_dir, f"checkpoint-{global_step}")
                 accelerator.save_state(save_path)

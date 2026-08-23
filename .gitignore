@@ -1,2 +1,7 @@
 __pycache__
 logs
+*.bin
+*.pkl
+*.safetensors
+events.out.*
+Thumbs.db
