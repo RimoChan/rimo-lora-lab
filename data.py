@@ -1,4 +1,5 @@
 import io
+import re
 import random
 import hashlib
 from pathlib import Path
@@ -7,11 +8,14 @@ from PIL import Image
 from torchvision import transforms
 
 
-def add(a, b):
-    return a + b
+def _shuffle(s: str, start: int) -> str:
+    a = [i.strip() for i in s.split(',')]
+    a1, a2 = a[:start], a[start:]
+    random.shuffle(a2)
+    return ', '.join(a1 + a2)
 
 
-def 读取数据集(p: str, *, shuffle_tag=True, drop_tag_rate=0, drop_text_rate=0, size_min, size_max, image_exts={'.jpg', '.jpeg', '.png', '.bmp', '.webp'}, prompt_post_process='', prompt_post_process_arg=None):
+def 读取数据集(p: str, *, drop_tag_rate=0, drop_text_rate=0, size_min, size_max, image_exts={'.jpg', '.jpeg', '.png', '.bmp', '.webp'}, prompt_post_process='', use_mask=False):
     def random_scale(img):
         w, h = img.size
         current_avg = (w + h) / 2.0
@@ -49,14 +53,11 @@ def 读取数据集(p: str, *, shuffle_tag=True, drop_tag_rate=0, drop_text_rate
                     for tag in 新sa:
                         if random.random() < drop_tag_rate:
                             新sa.remove(tag)
-                if shuffle_tag:
-                    random.shuffle(新sa)
                 新s = ', '.join(新sa)
                 if drop_text_rate and random.random() < drop_text_rate:
                     新s = ''
             if prompt_post_process:
-                f = globals()[prompt_post_process]
-                新s = f(新s, prompt_post_process_arg)
+                新s = eval(prompt_post_process, {'s': 新s, 'random': random, 're': re, 'shuffle': _shuffle})
             yield {
                 'pixel_values': pixel_values.unsqueeze(0),
                 'prompts': [新s],

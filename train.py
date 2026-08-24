@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import pickle
 import logging
 import itertools
 from pathlib import Path
@@ -27,7 +28,7 @@ from diffusers.utils import convert_state_dict_to_diffusers, convert_unet_state_
 from diffusers.utils.torch_utils import is_compiled_module
 
 from compel import Compel, ReturnedEmbeddingsType
-from common import cycle, clean, 生成optimizer, 哈, 哈哈, encode_prompt, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg
+from common import clean, 生成optimizer, 哈, 哈哈, encode_prompt, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg, cosine_with_restart_scheduler改
 from data import 读取数据集
 
 
@@ -109,7 +110,6 @@ def conditional_loss( model_pred: torch.Tensor, target: torch.Tensor, reduction:
 
 
 def vae_encode_with_cache(vae, pixel_values, cache_dir, 哈希值) -> torch.Tensor:
-    import pickle
     p = Path(cache_dir) / f'{哈希值}.pkl'
     if p.exists():
         return pickle.load(open(p, 'rb'))
@@ -121,15 +121,15 @@ def vae_encode_with_cache(vae, pixel_values, cache_dir, 哈希值) -> torch.Tens
 
 def main(
     pretrained_model_name_or_path: str | list[str],
-    validation_prompt_list: str | list[str],
     train_data_dir: str | list[str],
+    validation_prompt_list: str | list[str] = '1girl',
     prior_loss_train_data_dir: str | list[str] = None,
     cache_dir: str = './rimo_lora_lab_cache',
     validation_steps: int = 100,
     prior_loss_steps: int = 8,
     output_dir: str = "lora",
     seed: int = None,
-    batch_size: int = 16,
+    batch_size: int = 1,
     max_train_steps: int = 10000,
     cycle_steps: int = 3000,
     checkpointing_steps: int = 500,
@@ -137,12 +137,13 @@ def main(
     gradient_checkpointing: bool = False,
     lr: float = 1e-4,
     lr_scheduler: str = "constant_with_warmup",
-    lr_warmup_steps: int = 500,
+    lr_warmup_steps: int = 50,
+    lr_cosine_min: float = 0.1,
     snr_gamma: float = None,
     optimizer: str = "adam",
     adam_beta1: float = 0.9,
     adam_beta2: float = 0.999,
-    adam_weight_decay: float = 1e-2,
+    adam_weight_decay: float = 0.1,
     adam_epsilon: float = 1e-8,
     max_grad_norm: float = 1.0,
     prediction_type: str = None,
@@ -157,12 +158,8 @@ def main(
     size_max: int = 1280,
     drop_tag_rate: float = 0.0,
     drop_text_rate: float = 0.0,
-    shuffle_tag: bool = False,
-    prior_loss_shuffle_tag: bool = False,
     prompt_post_process: str = '',
-    prompt_post_process_arg: Any = None,
     prior_loss_prompt_post_process: str = '',
-    prior_loss_prompt_post_process_arg: Any = None,
     swap_every_n_steps: int = 8,
     resume_from_checkpoint: str = 'latest',
     use_mask: bool = False,
@@ -272,18 +269,21 @@ def main(
         models = [unet]
         cast_training_params(models, dtype=torch.float32)
 
-    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_steps}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', prompt_post_process, prior_loss_prompt_post_process, f'sf_{"FT"[shuffle_tag]}_{"FT"[prior_loss_shuffle_tag]}', f'mask{mask_min}' * use_mask, seed]
+    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_steps}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'{lr_cosine_min}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{mask_min}' * use_mask, seed]
     特征 = '-'.join([str(i) for i in 特 if i != ''])
 
     optimizer = 生成optimizer(optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, lr, lr * 20)
 
-    lr_scheduler = get_scheduler(
-        lr_scheduler,
+    d = dict(
         optimizer=optimizer,
         num_warmup_steps=lr_warmup_steps * gradient_accumulation_steps,
         num_training_steps=max_train_steps * gradient_accumulation_steps * 1000,
         num_cycles=round(max_train_steps * gradient_accumulation_steps * 1000 / cycle_steps),
     )
+    if lr_scheduler == 'cosine_with_restarts':
+        lr_scheduler = cosine_with_restart_scheduler改(**d, cosine_min=lr_cosine_min)
+    else:
+        lr_scheduler = get_scheduler(lr_scheduler, **d)
 
     unet, optimizer, lr_scheduler = accelerator.prepare(
         unet, optimizer, lr_scheduler
@@ -294,7 +294,8 @@ def main(
     checkpoint_dir = os.path.join(output_dir, 特征)
     os.makedirs(checkpoint_dir, exist_ok=True)
     with open(Path(checkpoint_dir) / 'metadata.json', 'w', encoding='utf8') as f:
-        json.dump(metadata, f, indent=2)
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    print('开始训练: ', str((Path(checkpoint_dir) / 'metadata.json').resolve()))
     global_step = 0
     if resume_from_checkpoint == 'latest':
         if 候选checkpoint := [*Path(checkpoint_dir).glob('checkpoint-*')]:
@@ -313,12 +314,12 @@ def main(
     )
 
     源 = buffered_iterator(itertools.chain.from_iterable(zip(*[
-        读取数据集(i, shuffle_tag=shuffle_tag, drop_tag_rate=drop_tag_rate, drop_text_rate=drop_text_rate, size_min=size_min, size_max=size_max, prompt_post_process=prompt_post_process, prompt_post_process_arg=prompt_post_process_arg, use_mask=use_mask)
+        读取数据集(i, drop_tag_rate=drop_tag_rate, drop_text_rate=drop_text_rate, size_min=size_min, size_max=size_max, prompt_post_process=prompt_post_process, use_mask=use_mask)
         for i in train_data_dir
     ])))
     if prior_loss_train_data_dir:
         源p = buffered_iterator(itertools.chain.from_iterable(zip(*[
-            读取数据集(i, shuffle_tag=prior_loss_shuffle_tag, size_min=size_min, size_max=size_max, prompt_post_process=prior_loss_prompt_post_process, prompt_post_process_arg=prior_loss_prompt_post_process_arg)
+            读取数据集(i, size_min=size_min, size_max=size_max, prompt_post_process=prior_loss_prompt_post_process)
             for i in prior_loss_train_data_dir
         ])))
     unet.train()
@@ -342,7 +343,7 @@ def main(
             continue
         if global_step < 100:
             with open(f'{checkpoint_dir}/prompt_log.txt', 'a', encoding='utf8') as f:
-                print('\n'.join(['-'*9, f'{在训练正则化=}', batch['raw_prompts'][0], batch['prompts'][0]]), file=f)
+                print('\n'.join(['-'*9, f'{在训练正则化=}', '【原本】', batch['raw_prompts'][0], '【改后】', batch['prompts'][0]]), file=f)
         with accelerator.accumulate(unet), 计时(accelerator, global_step, '全', sync=True):
             h, w = batch['pixel_values'].shape[2:]
             noise = torch.randn_like(model_input)

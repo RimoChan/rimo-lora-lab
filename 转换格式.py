@@ -15,6 +15,6 @@ def convert_and_save(input_lora, output_lora, alpha, metadata={}):
     save_file(kohya_state_dict, output_lora, metadata={'source': str(input_lora)} | {k: str(v) for k, v in metadata.items()})
 
 
-# metadata = json.load(open(f'{名字}/metadata.json'))
+# metadata = json.load(open(f'{名字}/metadata.json', encoding='utf8'))
 # alpha = metadata['alpha']
 # convert_and_save(f'{名字}/checkpoint-6000/pytorch_lora_weights.safetensors', f'R:/stable-diffusion-webui-master/models/Lora/my_lora.safetensors', alpha, metadata)

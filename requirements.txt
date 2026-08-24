@@ -1,0 +1,11 @@
+diffusers==0.38.0
+accelerate==0.34.0
+transformers==5.1.0
+peft==0.18.1
+fire==0.7.1
+compel==2.0.3
+tqdm==4.67.1
+pillow==11.3.0
+tensorboard==2.20.0
+safetensors==0.8.0rc0
+bitsandbytes==0.49.2

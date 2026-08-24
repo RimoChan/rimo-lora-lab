@@ -46,6 +46,10 @@ def 哈(x) -> str:
     return hashlib.md5(str(x).encode()).hexdigest().upper()[:3]
 
 
+def 哈哈(x: list) -> str:
+    return '_'.join([哈(i) for i in x])
+
+
 def cycle(iterable_obj):
     while True:
         yield from iterable_obj
