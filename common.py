@@ -182,31 +182,12 @@ def add_image_jpeg(writer, tag, img, global_step, quality=90):
     writer.file_writer.add_summary(summary, global_step)
 
 
-def get_cosine_with_hard_restarts_schedule_with_warmup(
-    optimizer: Optimizer, num_warmup_steps: int, num_training_steps: int, num_cycles: int = 1, last_epoch: int = -1
-) -> LambdaLR:
+def cosine_with_restart_scheduler改(optimizer: Optimizer, num_warmup_steps: Optional[int] = None, num_training_steps: Optional[int] = None, num_cycles: int = 1, cosine_min: float = 0.1) -> LambdaLR:
     def lr_lambda(current_step):
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
         progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
         if progress >= 1.0:
             return 0.0
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(num_cycles) * progress) % 1.0)))) * 0.9 + 0.1
-
-    return LambdaLR(optimizer, lr_lambda, last_epoch)
-
-
-def cosine_with_restart_scheduler改(
-    optimizer: Optimizer,
-    num_warmup_steps: Optional[int] = None,
-    num_training_steps: Optional[int] = None,
-    num_cycles: int = 1,
-    last_epoch: int = -1,
-) -> LambdaLR:
-    return get_cosine_with_hard_restarts_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=num_warmup_steps,
-        num_training_steps=num_training_steps,
-        num_cycles=num_cycles,
-        last_epoch=last_epoch,
-    )
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(num_cycles) * progress) % 1.0)))) * (1-cosine_min) + cosine_min
+    return LambdaLR(optimizer, lr_lambda)

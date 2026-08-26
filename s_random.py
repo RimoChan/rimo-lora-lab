@@ -1,5 +1,5 @@
 import random as 原版random
-
+from collections import Counter
 
 _d = {}
 
@@ -31,3 +31,12 @@ if __name__ == '__main__':
     b = np.array([原版random.random() for _ in range(100000)])
     print(0.99 < a.mean()/b.mean() < 1.01)
     print(0.99 < a.var()/b.var() < 1.01)
+    
+    av = bv = 0
+    for _ in range(5000):
+        a = np.array([*Counter([int(random('2')*10) for _ in range(100)]).values()])
+        # a = np.array([*Counter([int(原版random.random()*10) for _ in range(1000)]).values()])
+        b = np.array([*Counter([int(原版random.random()*10) for _ in range(100)]).values()])
+        av += a.var()
+        bv += b.var()
+    print(av/5000, bv/5000)

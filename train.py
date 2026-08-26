@@ -26,8 +26,9 @@ from diffusers.optimization import get_scheduler
 from diffusers.training_utils import cast_training_params, compute_snr
 from diffusers.utils import convert_state_dict_to_diffusers, convert_unet_state_dict_to_peft
 from diffusers.utils.torch_utils import is_compiled_module
-
 from compel import Compel, ReturnedEmbeddingsType
+
+import s_random
 from common import clean, 生成optimizer, 哈, 哈哈, encode_prompt, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg, cosine_with_restart_scheduler改
 from data import 读取数据集
 
@@ -82,8 +83,8 @@ def 加载模型(path) -> tuple:
     return text_encoder_one, text_encoder_two, compel, 临时pipeline.unet, 临时pipeline.vae, noise_scheduler
 
 
-def 相位转移(unet, state_dict):
-    udk = [*unet.state_dict().keys()]
+def 相位转移(model, state_dict):
+    udk = [*model.state_dict().keys()]
     dd = {}
     for k, v in state_dict.items():
         if k in udk:
@@ -92,7 +93,7 @@ def 相位转移(unet, state_dict):
             dd[k.replace(".bias", ".base_layer.bias").replace(".weight", ".base_layer.weight")] = v
     for k in dd:
         assert k in udk
-    unet.load_state_dict(dd, strict=False)
+    model.load_state_dict(dd, strict=False)
 
 
 def conditional_loss( model_pred: torch.Tensor, target: torch.Tensor, reduction: str = "mean", loss_type: str = "l2", huber_c: float = 0.1,):
@@ -126,7 +127,7 @@ def main(
     prior_loss_train_data_dir: str | list[str] = None,
     cache_dir: str = './rimo_lora_lab_cache',
     validation_steps: int = 100,
-    prior_loss_steps: int = 8,
+    prior_loss_rate: float = 0.125,
     output_dir: str = "lora",
     seed: int = None,
     batch_size: int = 1,
@@ -186,8 +187,9 @@ def main(
     if isinstance(prior_loss_train_data_dir, str):
         prior_loss_train_data_dir = prior_loss_train_data_dir.split(';')
     if accelerator.is_main_process:
-        if output_dir is not None:
-            os.makedirs(output_dir, exist_ok=True)
+        for d in [cache_dir, output_dir]:
+            if d is not None:
+                os.makedirs(d, exist_ok=True)
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -197,16 +199,19 @@ def main(
     text_encoder_one, text_encoder_two, compel, unet, vae, noise_scheduler = 加载模型(pretrained_model_name_or_path[0])
     if len(pretrained_model_name_or_path) > 1:
         unet_state_dicts = [unet.to('cpu', dtype=weight_dtype).state_dict()]
+        te1_state_dicts = [text_encoder_one.to('cpu', dtype=weight_dtype).state_dict()]
+        te2_state_dicts = [text_encoder_two.to('cpu', dtype=weight_dtype).state_dict()] if text_encoder_two else []
         for p in pretrained_model_name_or_path[1:]:
-            other_unet = 加载模型(p)[3]
+            other_te1, other_te2, _, other_unet, _, _ = 加载模型(p)
             unet_state_dicts.append(other_unet.to('cpu', dtype=weight_dtype).state_dict())
-            del other_unet
+            te1_state_dicts.append(other_te1.to('cpu', dtype=weight_dtype).state_dict())
+            te2_state_dicts.append(other_te2.to('cpu', dtype=weight_dtype).state_dict())
+            del other_unet, other_te1, other_te2
 
     unet.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=torch.float32)
     text_encoder_one.to(accelerator.device, dtype=weight_dtype)
-    if text_encoder_two:
-        text_encoder_two.to(accelerator.device, dtype=weight_dtype)
+    text_encoder_two.to(accelerator.device, dtype=weight_dtype)
 
     unet.add_adapter(LoraConfig(
         r=rank,
@@ -269,7 +274,7 @@ def main(
         models = [unet]
         cast_training_params(models, dtype=torch.float32)
 
-    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_steps}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'{lr_cosine_min}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{mask_min}' * use_mask, seed]
+    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'{lr_cosine_min}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{mask_min}' * use_mask, seed]
     特征 = '-'.join([str(i) for i in 特 if i != ''])
 
     optimizer = 生成optimizer(optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, lr, lr * 20)
@@ -329,7 +334,9 @@ def main(
             current_model_index = (current_model_index + 1) % len(pretrained_model_name_or_path)
             with 计时(accelerator, global_step, '相位转移', sync=True):
                 相位转移(unet, unet_state_dicts[current_model_index])
-        在训练正则化 = bool(prior_loss_train_data_dir and (global_step % prior_loss_steps == prior_loss_steps - 1))
+                相位转移(text_encoder_one, te1_state_dicts[current_model_index])
+                相位转移(text_encoder_two, te2_state_dicts[current_model_index])
+        在训练正则化 = bool(prior_loss_train_data_dir and s_random.random('正则化') < prior_loss_rate)
         if 在训练正则化:
             batch = next(源p)
         else:
