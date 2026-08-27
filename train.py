@@ -1,4 +1,6 @@
 import os
+os.environ['PYTORCH_ALLOC_CONF'] = os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:cudaMallocAsync,expandable_segments:True'
+
 import time
 import json
 import pickle
@@ -9,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import fire
+import httpx
 import requests
 import numpy as np
 import torch
@@ -47,7 +50,7 @@ def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet
                         torch_dtype=torch_dtype,
                     ).to(accelerator.device)
                     break
-                except requests.exceptions.RequestException as e:
+                except (requests.exceptions.RequestException, httpx.HTTPError) as e:
                     print('网络不好，休息1下！', repr(e))
                     time.sleep(30)
             pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config)
@@ -135,7 +138,7 @@ def main(
     cycle_steps: int = 3000,
     checkpointing_steps: int = 500,
     gradient_accumulation_steps: int = 1,
-    gradient_checkpointing: bool = False,
+    gradient_checkpointing: bool = True,
     lr: float = 1e-4,
     lr_scheduler: str = "constant_with_warmup",
     lr_warmup_steps: int = 50,
@@ -165,11 +168,14 @@ def main(
     resume_from_checkpoint: str = 'latest',
     use_mask: bool = False,
     mask_min: float = 0.1,
+    noise_candidates: int = 1,
 ):
     alpha = alpha or rank // 2
     if seed is None:
         seed = int(time.time()) % 100
     metadata = {k: v for k, v in locals().items() if isinstance(v, (float, int, str)) and not k.startswith('_')}
+    metadata['torch_version'] = torch.__version__
+    metadata['device_name'] = torch.cuda.get_device_name()
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
@@ -274,7 +280,7 @@ def main(
         models = [unet]
         cast_training_params(models, dtype=torch.float32)
 
-    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'{lr_cosine_min}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{mask_min}' * use_mask, seed]
+    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'{lr_cosine_min}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{mask_min}' * use_mask, f'nc{noise_candidates}' * (noise_candidates > 1), seed]
     特征 = '-'.join([str(i) for i in 特 if i != ''])
 
     optimizer = 生成optimizer(optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, lr, lr * 20)
@@ -353,7 +359,15 @@ def main(
                 print('\n'.join(['-'*9, f'{在训练正则化=}', '【原本】', batch['raw_prompts'][0], '【改后】', batch['prompts'][0]]), file=f)
         with accelerator.accumulate(unet), 计时(accelerator, global_step, '全', sync=True):
             h, w = batch['pixel_values'].shape[2:]
-            noise = torch.randn_like(model_input)
+            if noise_candidates > 1:    # 这个分支似乎并不会加速收敛，并且开到100以上的话，推理结果会变灰，后面考虑去掉了
+                k = max(1, round(noise_candidates * 0.27))
+                候选 = torch.randn(noise_candidates, *model_input.shape, device=model_input.device, dtype=model_input.dtype)
+                距离 = (候选 - model_input).flatten(2).norm(dim=-1)
+                idx = 距离.argsort(dim=0)[:k]
+                noise = 候选.gather(0, idx.view(k, -1, 1, 1, 1).expand(-1, *model_input.shape)).sum(0)
+                noise = (noise - noise.mean(dim=(1, 2, 3), keepdim=True)) / noise.std(dim=(1, 2, 3), keepdim=True)
+            else:
+                noise = torch.randn_like(model_input)
             bsz = model_input.shape[0]
             if 在训练正则化:
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device)
