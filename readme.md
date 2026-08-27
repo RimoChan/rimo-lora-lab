@@ -156,7 +156,7 @@ dataset/
 - mask_min原本是0，但是发现这样会在背景里产生很多artifact(圣遗物)，所以默认值是0.1。
 - prompt后处理的写法是1个Python表达式，比如`s + ', rimochan'`。
   - 原本是设置成了配置函数名+参数的形式，但是试了1下感觉反而很难用，就不过度设计了，这里化繁就简，让大家直接写eval。
-
+  - 输出文件夹里面有`prompt_log.txt`，担心自己的后处理究竟写对了没有的话，可以来看它们。
 
 ## 赠品
 
@@ -166,7 +166,7 @@ dataset/
 tensorboard --logdir lora_output/logs
 ```
 
-此外，输出文件夹里面有`metadata.json`和`prompt_log.txt`，担心自己的后处理究竟写对了没有的话，可以来看它们。
+此外，因为输出是diffusers格式，直接放到SD-WebUI里它会不识别，所以需要用「转换格式.py」转换1下，这个用法就大家自己看吧！
 
 
 ## 结束
