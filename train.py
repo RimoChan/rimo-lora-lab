@@ -8,20 +8,18 @@ import logging
 import itertools
 from pathlib import Path
 
-from typing import Any
-
 import fire
-import httpx
-import requests
 import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
+
 from peft import LoraConfig, set_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
 from PIL import ImageDraw, ImageFont
 from tqdm.auto import tqdm
+
 
 from diffusers import DDPMScheduler, StableDiffusionXLPipeline, DPMSolverMultistepScheduler
 from diffusers.loaders import StableDiffusionLoraLoaderMixin
@@ -38,6 +36,8 @@ from data import 读取数据集
 
 def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet, torch_dtype, trackers, pretrained_model_name_or_path, validation_prompt_list, current_model_index):
     if accelerator.is_main_process:
+        import httpx
+        import requests
         with torch.inference_mode():
             for _ in range(1000):
                 try:
@@ -173,7 +173,7 @@ def main(
     alpha = alpha or rank // 2
     if seed is None:
         seed = int(time.time()) % 100
-    metadata = {k: v for k, v in locals().items() if isinstance(v, (float, int, str)) and not k.startswith('_')}
+    metadata = {k: v for k, v in locals().items() if isinstance(v, (float, int, str, list, tuple)) and not k.startswith('_')}
     metadata['torch_version'] = torch.__version__
     metadata['device_name'] = torch.cuda.get_device_name()
     accelerator = Accelerator(
@@ -201,6 +201,19 @@ def main(
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
+
+    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate > 0 or drop_text_rate > 0), mixed_precision, lr_scheduler, f'{lr_cosine_min}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{mask_min}' * use_mask, f'nc{noise_candidates}' * (noise_candidates > 1), seed]
+    特征 = '-'.join([str(i) for i in 特 if i != ''])
+
+    if os.path.isdir(os.path.join(output_dir, 特征, f'checkpoint-{max_train_steps}')):
+        print('跳过', 特征)
+        return
+
+    checkpoint_dir = os.path.join(output_dir, 特征)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    with open(Path(checkpoint_dir) / 'metadata.json', 'w', encoding='utf8') as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    print('开始训练: ', str((Path(checkpoint_dir) / 'metadata.json').resolve()))
 
     text_encoder_one, text_encoder_two, compel, unet, vae, noise_scheduler = 加载模型(pretrained_model_name_or_path[0])
     if len(pretrained_model_name_or_path) > 1:
@@ -280,9 +293,6 @@ def main(
         models = [unet]
         cast_training_params(models, dtype=torch.float32)
 
-    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate > 0 or drop_text_rate > 0), mixed_precision, lr_scheduler, f'{lr_cosine_min}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{mask_min}' * use_mask, f'nc{noise_candidates}' * (noise_candidates > 1), seed]
-    特征 = '-'.join([str(i) for i in 特 if i != ''])
-
     optimizer = 生成optimizer(optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, lr, lr * 20)
 
     d = dict(
@@ -302,11 +312,7 @@ def main(
 
     if accelerator.is_main_process:
         accelerator.init_trackers(特征)
-    checkpoint_dir = os.path.join(output_dir, 特征)
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    with open(Path(checkpoint_dir) / 'metadata.json', 'w', encoding='utf8') as f:
-        json.dump(metadata, f, indent=2, ensure_ascii=False)
-    print('开始训练: ', str((Path(checkpoint_dir) / 'metadata.json').resolve()))
+
     global_step = 0
     if resume_from_checkpoint == 'latest':
         if 候选checkpoint := [*Path(checkpoint_dir).glob('checkpoint-*')]:
@@ -343,14 +349,16 @@ def main(
                 相位转移(text_encoder_one, te1_state_dicts[current_model_index])
                 相位转移(text_encoder_two, te2_state_dicts[current_model_index])
         在训练正则化 = bool(prior_loss_train_data_dir and s_random.random('正则化') < prior_loss_rate)
-        if 在训练正则化:
-            batch = next(源p)
-        else:
-            batch = next(源)
+        with 计时(accelerator, global_step, '取数据'):
+            if 在训练正则化:
+                batch = next(源p)
+            else:
+                batch = next(源)
         try:
             with 计时(accelerator, global_step, 'VAE', sync=True):
                 model_input = vae_encode_with_cache(vae, batch["pixel_values"], cache_dir, batch["image_hash"]).to(weight_dtype)
-            prompt_embeds, pooled_prompt_embeds = encode_prompt(batch['prompts'], compel)
+            with 计时(accelerator, global_step, 'TE', sync=True):
+                prompt_embeds, pooled_prompt_embeds = encode_prompt(batch['prompts'], compel)
         except Exception:
             logging.exception('准备输入时出了问题:')
             continue
@@ -379,13 +387,14 @@ def main(
             unet_added_conditions = {"time_ids": add_time_ids}
             unet_added_conditions.update({"text_embeds": pooled_prompt_embeds})
 
-            model_pred = unet(
-                noisy_model_input,
-                timesteps,
-                prompt_embeds,
-                added_cond_kwargs=unet_added_conditions,
-                return_dict=False,
-            )[0]
+            with 计时(accelerator, global_step, '正向', sync=True):
+                model_pred = unet(
+                    noisy_model_input,
+                    timesteps,
+                    prompt_embeds,
+                    added_cond_kwargs=unet_added_conditions,
+                    return_dict=False,
+                )[0]
 
             if 在训练正则化:
                 with torch.inference_mode():
@@ -437,7 +446,8 @@ def main(
                     loss = loss * mask
                 loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
             loss = loss.mean()
-            accelerator.backward(loss)
+            with 计时(accelerator, global_step, '反向', sync=True):
+                accelerator.backward(loss)
             if accelerator.sync_gradients:
                 grad_norm = accelerator.clip_grad_norm_([*filter(lambda p: p.requires_grad, unet.parameters())], max_grad_norm)
             with 计时(accelerator, global_step, 'optimizer', sync=True):
@@ -446,20 +456,21 @@ def main(
                 optimizer.zero_grad()
 
         if accelerator.sync_gradients:
-            if global_step % validation_steps == 0 or global_step in [checkpointing_steps//2, checkpointing_steps//4]:
-                validation(
-                    accelerator=accelerator,
-                    vae=vae,
-                    text_encoder=unwrap_model(text_encoder_one),
-                    text_encoder_2=unwrap_model(text_encoder_two),
-                    unet=unwrap_model(unet),
-                    torch_dtype=weight_dtype,
-                    trackers=accelerator.trackers,
-                    global_step=global_step,
-                    pretrained_model_name_or_path=pretrained_model_name_or_path[0],
-                    validation_prompt_list=validation_prompt_list,
-                    current_model_index=current_model_index,
-                )
+            if validation_steps and global_step % validation_steps == 0 or global_step in [checkpointing_steps//2, checkpointing_steps//4]:
+                with 计时(accelerator, global_step, 'validation', sync=True):
+                    validation(
+                        accelerator=accelerator,
+                        vae=vae,
+                        text_encoder=unwrap_model(text_encoder_one),
+                        text_encoder_2=unwrap_model(text_encoder_two),
+                        unet=unwrap_model(unet),
+                        torch_dtype=weight_dtype,
+                        trackers=accelerator.trackers,
+                        global_step=global_step,
+                        pretrained_model_name_or_path=pretrained_model_name_or_path[0],
+                        validation_prompt_list=validation_prompt_list,
+                        current_model_index=current_model_index,
+                    )
             前缀 = '正则化' * 在训练正则化
             logs = {f"{前缀}loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], f"{前缀}grad_norm": grad_norm.item(), f"{前缀}t": timesteps[0]}
             for a, b in itertools.pairwise([1000, 900, 800, 0]):
@@ -478,8 +489,12 @@ def main(
                 logging.info(f"Saved state to {save_path}")
 
 
-# accelerate launch train通用.py --pretrained_model_name_or_path="R:\stable-diffusion-webui-master\models\Stable-diffusion\waiNSFWIllustrious_v100.safetensors" --train_data_dir="X:/ck3_loading_screens6" --output_dir="ck3" --batch_size=1 --validation_steps=500 --checkpointing_steps=500 --lr_warmup_steps=50 --gradient_checkpointing --seed=114514 --loss_type=huber --validation_prompt_list="1girl, twintails, white hair, school uniform, indoors;1girl, twintails, white hair, school uniform, outdoors;1girl, twintails, white hair, school uniform, outdoors, baram, starshadowmagician" --max_train_steps=5000
-# "R:\stable-diffusion-webui-master\models\Stable-diffusion\waiNSFWIllustrious_v100.safetensors"
-# "Y:\models\Diffusion\illustriousXL_v01.safetensors"
+def ember(config={}, **kwargs):
+    if isinstance(config, str):
+        with open(config, 'r', encoding='utf8') as f:
+            config = json.load(f)
+    return main(**{k: v for k, v in (config | kwargs).items() if k not in ('torch_version', 'device_name')})
+
+
 if __name__ == "__main__":
-    fire.Fire(main)
+    fire.Fire(ember)
