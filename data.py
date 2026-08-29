@@ -15,11 +15,13 @@ def _shuffle(s: str, start: int) -> str:
     return ', '.join(a1 + a2)
 
 
-def 读取数据集(p: str, *, drop_tag_rate=0, drop_text_rate=0, size_min, size_max, image_exts={'.jpg', '.jpeg', '.png', '.bmp', '.webp'}, prompt_post_process='', use_mask=False):
+def 读取数据集(p: str, *, drop_tag_rate=0, drop_text_rate=0, size_min, size_max, image_exts={'.jpg', '.jpeg', '.png', '.bmp', '.webp'}, prompt_post_process='', use_mask=False, seed=1):
+    r = random.Random(seed)
+
     def 处理图片(img, mask=None):
         w, h = img.size
         current_avg = (w + h) / 2.0
-        target_avg = random.randint(size_min, size_max)
+        target_avg = r.randint(size_min, size_max)
         scale_factor = target_avg / current_avg
         new_w = int(w * scale_factor)
         new_h = int(h * scale_factor)
@@ -45,7 +47,7 @@ def 读取数据集(p: str, *, drop_tag_rate=0, drop_text_rate=0, size_min, size
                     a.append((img_path, txt_path))
     print(f'{p}中找到了{len(a)}个对！')
     while True:
-        random.shuffle(a)
+        r.shuffle(a)
         for item in a:
             img_path, txt_path = item[0], item[1]
             img_bytes = img_path.read_bytes()
@@ -60,10 +62,10 @@ def 读取数据集(p: str, *, drop_tag_rate=0, drop_text_rate=0, size_min, size
                 新sa = s.split(', ')
                 if drop_tag_rate > 0:
                     for tag in 新sa:
-                        if random.random() < drop_tag_rate:
+                        if r.random() < drop_tag_rate:
                             新sa.remove(tag)
                 新s = ', '.join(新sa)
-                if drop_text_rate and random.random() < drop_text_rate:
+                if drop_text_rate and r.random() < drop_text_rate:
                     新s = ''
             if prompt_post_process:
                 新s = eval(prompt_post_process, {'s': 新s, 'random': random, 're': re, 'shuffle': _shuffle})

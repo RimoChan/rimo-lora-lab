@@ -99,7 +99,7 @@ def 相位转移(model, state_dict):
     model.load_state_dict(dd, strict=False)
 
 
-def conditional_loss( model_pred: torch.Tensor, target: torch.Tensor, reduction: str = "mean", loss_type: str = "l2", huber_c: float = 0.1,):
+def conditional_loss(model_pred: torch.Tensor, target: torch.Tensor, reduction: str = "mean", loss_type: str = "l2", huber_c: float = 0.1,):
     if loss_type == "l2":
         loss = F.mse_loss(model_pred, target, reduction=reduction)
     elif loss_type == "huber" or loss_type == "huber_scheduled":
@@ -280,7 +280,7 @@ def main(
         models = [unet]
         cast_training_params(models, dtype=torch.float32)
 
-    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate>0 or drop_text_rate>0), mixed_precision, lr_scheduler, f'{lr_cosine_min}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{mask_min}' * use_mask, f'nc{noise_candidates}' * (noise_candidates > 1), seed]
+    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate > 0 or drop_text_rate > 0), mixed_precision, lr_scheduler, f'{lr_cosine_min}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{mask_min}' * use_mask, f'nc{noise_candidates}' * (noise_candidates > 1), seed]
     特征 = '-'.join([str(i) for i in 特 if i != ''])
 
     optimizer = 生成optimizer(optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, lr, lr * 20)
@@ -325,12 +325,12 @@ def main(
     )
 
     源 = buffered_iterator(itertools.chain.from_iterable(zip(*[
-        读取数据集(i, drop_tag_rate=drop_tag_rate, drop_text_rate=drop_text_rate, size_min=size_min, size_max=size_max, prompt_post_process=prompt_post_process, use_mask=use_mask)
+        读取数据集(i, drop_tag_rate=drop_tag_rate, drop_text_rate=drop_text_rate, size_min=size_min, size_max=size_max, prompt_post_process=prompt_post_process, use_mask=use_mask, seed=seed+1)
         for i in train_data_dir
     ])))
     if prior_loss_train_data_dir:
         源p = buffered_iterator(itertools.chain.from_iterable(zip(*[
-            读取数据集(i, size_min=size_min, size_max=size_max, prompt_post_process=prior_loss_prompt_post_process)
+            读取数据集(i, size_min=size_min, size_max=size_max, prompt_post_process=prior_loss_prompt_post_process, seed=seed+2)
             for i in prior_loss_train_data_dir
         ])))
     unet.train()
@@ -386,7 +386,6 @@ def main(
                 added_cond_kwargs=unet_added_conditions,
                 return_dict=False,
             )[0]
-
 
             if 在训练正则化:
                 with torch.inference_mode():
