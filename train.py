@@ -169,6 +169,7 @@ def main(
     use_mask: bool = False,
     mask_min: float = 0.1,
     noise_candidates: int = 1,
+    use_compile: bool = False,
 ):
     alpha = alpha or rank // 2
     if seed is None:
@@ -231,6 +232,9 @@ def main(
     vae.to(accelerator.device, dtype=torch.float32)
     text_encoder_one.to(accelerator.device, dtype=weight_dtype)
     text_encoder_two.to(accelerator.device, dtype=weight_dtype)
+    if use_compile:
+        text_encoder_one.forward = torch.compile(text_encoder_one.forward, dynamic=True)
+        text_encoder_two.forward = torch.compile(text_encoder_two.forward, dynamic=True)
 
     unet.add_adapter(LoraConfig(
         r=rank,
@@ -288,6 +292,12 @@ def main(
 
     if gradient_checkpointing:
         unet.enable_gradient_checkpointing()
+
+    if use_compile:
+        for block in (*unet.down_blocks, unet.mid_block, *unet.up_blocks):
+            if hasattr(block, 'attentions'):
+                for i in range(len(block.attentions)):
+                    block.attentions[i].forward = torch.compile(block.attentions[i].forward, dynamic=True)
 
     if mixed_precision == "fp16":
         models = [unet]
@@ -446,6 +456,9 @@ def main(
                     loss = loss * mask
                 loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
             loss = loss.mean()
+            if global_step < 100 and accelerator.is_main_process:
+                with open(f'{checkpoint_dir}/loss_log.txt', 'a', encoding='utf8') as f:
+                    print(f'{global_step}: {loss.detach().item():.8f}', file=f)
             with 计时(accelerator, global_step, '反向', sync=True):
                 accelerator.backward(loss)
             if accelerator.sync_gradients:

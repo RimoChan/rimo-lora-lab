@@ -2,7 +2,6 @@ import gc
 import io
 import math
 import time
-import random
 import hashlib
 import threading
 import contextlib
@@ -31,15 +30,20 @@ def buffered_iterator(iterator, maxsize=10):
     yield from iter(q.get, sentinel)
 
 
+_计时上个触发step = {}
 @contextlib.contextmanager
 def 计时(accelerator, global_step, 名字, sync=False):
-    if sync and accelerator.is_main_process:
-        torch.cuda.synchronize()
-    开始时间 = time.time()
-    yield
-    if accelerator.is_main_process:
-        torch.cuda.synchronize()
-        accelerator.log({f'【计时】{名字}': time.time() - 开始时间}, step=global_step)
+    if _计时上个触发step.get(名字, -1) // 10*10 == global_step // 10*10:
+        yield
+    else:
+        _计时上个触发step[名字] = global_step
+        if sync and accelerator.is_main_process:
+            torch.cuda.synchronize()
+        开始时间 = time.time()
+        yield
+        if accelerator.is_main_process:
+            torch.cuda.synchronize()
+            accelerator.log({f'【计时】{名字}': time.time() - 开始时间}, step=global_step)
 
 
 def 哈(x) -> str:
@@ -61,7 +65,7 @@ def clean():
     torch.cuda.empty_cache()
 
 
-def clone_state_dict(d: dict) -> dict: 
+def clone_state_dict(d: dict) -> dict:
     new_state_dict = {}
     for key, value in d.items():
         new_state_dict[key] = value.detach().clone()
@@ -136,33 +140,6 @@ def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_de
     else:
         raise ValueError(f'这是什么优化器？{args_optimizer}')
     return optimizer
-
-
-def 评测pipeline(pipe, n_iter, tags_seed=0, random_seed=0, guidance_scale_range=(6, 8)):
-    import benchmarker.ml_danbooru
-    from benchmarker.common import 要测的标签, ml_danbooru标签2
-    rd_tag = random.Random(tags_seed)
-    rd = random.Random(random_seed)
-    所有得分 = []
-    for _ in tqdm(range(n_iter), desc='评测'):
-        标签个数 = rd.randint(16, 21)
-        标签组 = rd_tag.sample(要测的标签, 标签个数)
-        assert '_' not in str(标签组)
-        下划线标签组 = [i.strip().replace(' ', '_') for i in 标签组]
-        images = pipe(
-            prompt=f'1 girl, {", ".join(标签组)}',
-            negative_prompt = rd.choice(['worst quality, low quality', 'worst quality, low quality, blurry, greyscale, monochrome']),
-            generator=torch.Generator(device='cuda').manual_seed(rd.randint(0, 2**16)),
-            num_inference_steps=18+rd.randint(0, 6),
-            guidance_scale=random.randint(*guidance_scale_range),
-            width=704+rd.randint(0, 5)*64,
-            height=704+rd.randint(0, 5)*64,
-        ).images
-        预测标签 = ml_danbooru标签2(images)[0]
-        得分 = len(set(下划线标签组) & set(预测标签)) / len(set(下划线标签组))
-        所有得分.append(得分)
-    benchmarker.ml_danbooru.model = None
-    return sum(所有得分) / len(所有得分)
 
 
 def add_image_jpeg(writer, tag, img, global_step, quality=90):
