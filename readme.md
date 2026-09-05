@@ -108,10 +108,12 @@ dataset/
 | `prior_loss_rate` | `float` | `0.125` | 每步训练先验正则化的概率 |
 | `gradient_accumulation_steps` | `int` | `1` | 梯度累积步数 |
 | `gradient_checkpointing` | `bool` | `True` | 开启梯度检查点以节省显存 |
+| `use_compile` | `bool` | `False` | 开启torch.compile |
 | `mixed_precision` | `str` | `None` | 混合精度 |
 
-- swap_every_n_steps不要设得太低，因为交换1次要1.8秒。
-- mixed_precision的可选项是`fp16`、`bf16` 或 `None`。
+- swap_every_n_steps不要设得太低，因为交换1次要1~1.8秒，换太多训练会变慢。
+- mixed_precision的可选项是`fp16`、`bf16`、`None`。
+- windows上的torch.compile还要安装与torch版本对应的[triton-windows](https://github.com/triton-lang/triton-windows)。
 
 
 ### 优化器
@@ -146,15 +148,13 @@ dataset/
 | 参数 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `size_min` / `size_max` | `int` | `704` / `1280` | 随机缩放分辨率范围 |
-| `drop_tag_rate` | `float` | `0.0` | 逗号分隔tag的随机丢弃概率 |
-| `drop_text_rate` | `float` | `0.0` | 提示词整体随机置空概率 |
 | `prompt_post_process` | `str` | `''` | prompt后处理 |
 | `prior_loss_prompt_post_process` | `str` | `''` | 先验正则化的prompt后处理 |
 | `use_mask` | `bool` | `False` | 是否开启Mask区域加权损失 |
 | `mask_min` | `float` | `0.1` | Mask以外非重点区域的最小损失权重 |
 
-- mask_min原本是0，但是发现这样会在背景里产生很多artifact(圣遗物)，所以默认值是0.1。
-- prompt后处理的写法是1个Python表达式，比如`s + ', rimochan'`。
+- mask_min原本是0，但是发现这样会在背景里产生很多artifact<sub>(圣遗物)</sub>，所以默认值是0.1。
+- prompt后处理的写法是1个Python表达式，比如`s + ', rimochan'`，内置了2个函数`shuffle`和`drop`，用法可以自己看`data.py`。
   - 原本是设置成了配置函数名+参数的形式，但是试了1下感觉反而很难用，就不过度设计了，这里化繁就简，让大家直接写eval。
   - 输出文件夹里面有`prompt_log.txt`，担心自己的后处理究竟写对了没有的话，可以来看它们。
 

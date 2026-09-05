@@ -1,9 +1,12 @@
+import os
 import gc
 import io
 import math
+import glob
 import time
 import hashlib
 import threading
+import subprocess
 import contextlib
 from queue import Queue
 from typing import Optional
@@ -11,10 +14,21 @@ from typing import Optional
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import Optimizer
-from tqdm import tqdm
 from PIL import Image
 from tensorboard.compat.proto import summary_pb2
 import safetensors.torch
+
+
+def 注入cl():
+    vcvars_candidates = [*glob.glob(r"C:\Program Files*\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars64.bat")]
+    for vcvars in vcvars_candidates:
+        if os.path.exists(vcvars):
+            output = subprocess.check_output(f'"{vcvars}" && set', shell=True, text=True, errors="ignore")
+            for line in output.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ[k] = v
+            break
 
 
 def buffered_iterator(iterator, maxsize=10):

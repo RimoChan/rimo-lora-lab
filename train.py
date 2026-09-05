@@ -5,6 +5,7 @@ import time
 import json
 import pickle
 import logging
+import platform
 import itertools
 from pathlib import Path
 
@@ -30,7 +31,7 @@ from diffusers.utils.torch_utils import is_compiled_module
 from compel import Compel, ReturnedEmbeddingsType
 
 import s_random
-from common import clean, 生成optimizer, 哈, 哈哈, encode_prompt, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg, cosine_with_restart_scheduler改
+from common import clean, 生成optimizer, 哈, 哈哈, encode_prompt, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg, cosine_with_restart_scheduler改, 注入cl
 from data import 读取数据集
 
 
@@ -160,8 +161,6 @@ def main(
     time_max: int = 1000,
     size_min: int = 704,
     size_max: int = 1280,
-    drop_tag_rate: float = 0.0,
-    drop_text_rate: float = 0.0,
     prompt_post_process: str = '',
     prior_loss_prompt_post_process: str = '',
     swap_every_n_steps: int = 8,
@@ -203,7 +202,7 @@ def main(
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', f'drop{drop_tag_rate}_{drop_text_rate}' * (drop_tag_rate > 0 or drop_text_rate > 0), mixed_precision, lr_scheduler, f'{lr_cosine_min}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{mask_min}' * use_mask, f'nc{noise_candidates}' * (noise_candidates > 1), seed]
+    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', mixed_precision, lr_scheduler, f'{round(lr_cosine_min, 3)}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{round(mask_min, 3)}' * use_mask, f'nc{noise_candidates}' * (noise_candidates > 1), seed]
     特征 = '-'.join([str(i) for i in 特 if i != ''])
 
     if os.path.isdir(os.path.join(output_dir, 特征, f'checkpoint-{max_train_steps}')):
@@ -233,6 +232,8 @@ def main(
     text_encoder_one.to(accelerator.device, dtype=weight_dtype)
     text_encoder_two.to(accelerator.device, dtype=weight_dtype)
     if use_compile:
+        if platform.system() == 'Windows':
+            注入cl()
         text_encoder_one.forward = torch.compile(text_encoder_one.forward, dynamic=True)
         text_encoder_two.forward = torch.compile(text_encoder_two.forward, dynamic=True)
 
@@ -341,7 +342,7 @@ def main(
     )
 
     源 = buffered_iterator(itertools.chain.from_iterable(zip(*[
-        读取数据集(i, drop_tag_rate=drop_tag_rate, drop_text_rate=drop_text_rate, size_min=size_min, size_max=size_max, prompt_post_process=prompt_post_process, use_mask=use_mask, seed=seed+1)
+        读取数据集(i, size_min=size_min, size_max=size_max, prompt_post_process=prompt_post_process, use_mask=use_mask, seed=seed+1)
         for i in train_data_dir
     ])))
     if prior_loss_train_data_dir:

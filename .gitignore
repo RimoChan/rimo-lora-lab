@@ -7,3 +7,4 @@ events.out.*
 Thumbs.db
 metadata.json
 prompt_log.txt
+loss_log.txt
