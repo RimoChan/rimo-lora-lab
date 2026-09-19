@@ -163,6 +163,8 @@ def main(
     size_max: int = 1280,
     prompt_post_process: str = '',
     prior_loss_prompt_post_process: str = '',
+    balance_tags: str | list[str] = None,
+    balance_rate: float = 1.0,
     swap_every_n_steps: int = 8,
     resume_from_checkpoint: str = 'latest',
     use_mask: bool = False,
@@ -192,6 +194,8 @@ def main(
         train_data_dir = train_data_dir.split(';')
     if isinstance(prior_loss_train_data_dir, str):
         prior_loss_train_data_dir = prior_loss_train_data_dir.split(';')
+    if isinstance(balance_tags, str):
+        balance_tags = balance_tags.split(';') if ';' in balance_tags else balance_tags.split(',')
     if accelerator.is_main_process:
         for d in [cache_dir, output_dir]:
             if d is not None:
@@ -202,7 +206,7 @@ def main(
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', mixed_precision, lr_scheduler, f'{round(lr_cosine_min, 3)}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{round(mask_min, 3)}' * use_mask, f'nc{noise_candidates}' * (noise_candidates > 1), seed]
+    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', mixed_precision, lr_scheduler, f'{round(lr_cosine_min, 3)}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{round(mask_min, 3)}' * use_mask, f'nc{noise_candidates}' * (noise_candidates > 1), f'均{balance_rate}_{哈(balance_tags)}' if (balance_tags and balance_rate) else '', seed]
     特征 = '-'.join([str(i) for i in 特 if i != ''])
 
     if os.path.isdir(os.path.join(output_dir, 特征, f'checkpoint-{max_train_steps}')):
@@ -342,7 +346,7 @@ def main(
     )
 
     源 = buffered_iterator(itertools.chain.from_iterable(zip(*[
-        读取数据集(i, size_min=size_min, size_max=size_max, prompt_post_process=prompt_post_process, use_mask=use_mask, seed=seed+1)
+        读取数据集(i, size_min=size_min, size_max=size_max, balance_tags=balance_tags, balance_rate=balance_rate, prompt_post_process=prompt_post_process, use_mask=use_mask, seed=seed+1)
         for i in train_data_dir
     ])))
     if prior_loss_train_data_dir:
