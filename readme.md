@@ -65,7 +65,7 @@ accelerate launch train.py \
   --output_dir="lora_output" \
   --lr=1e-4 \
   --rank=32 \
-  --validation_steps=200 \
+  --validation_interval=200 \
   --validation_prompt_list="1girl, solo, masterpiece;1girl, outdoors, sunset" \
   --max_train_steps=3000
 ```
@@ -103,7 +103,7 @@ dataset/
 | :--- | :--- | :--- | :--- |
 | `max_train_steps` | `int` | `10000` | 最大训练总步数 |
 | `checkpointing_steps` | `int` | `500` | 保存checkpoint的步数间隔 |
-| `validation_steps` | `int` | `100` | 生成验证图的步数间隔 |
+| `validation_interval` | `int` | `100` | 生成验证图的步数间隔 |
 | `swap_every_n_steps` | `int` | `8` | 多底模训练时，切换底模的步数间隔 |
 | `prior_loss_rate` | `float` | `0.125` | 每步训练先验正则化的概率 |
 | `gradient_accumulation_steps` | `int` | `1` | 梯度累积步数 |

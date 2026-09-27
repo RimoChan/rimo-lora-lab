@@ -12,6 +12,7 @@ from pathlib import Path
 import fire
 import numpy as np
 import torch
+from torch import Tensor
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
@@ -21,7 +22,6 @@ from peft.utils import get_peft_model_state_dict
 from PIL import ImageDraw, ImageFont
 from tqdm.auto import tqdm
 
-
 from diffusers import DDPMScheduler, StableDiffusionXLPipeline, DPMSolverMultistepScheduler
 from diffusers.loaders import StableDiffusionLoraLoaderMixin
 from diffusers.optimization import get_scheduler
@@ -30,12 +30,13 @@ from diffusers.utils import convert_state_dict_to_diffusers, convert_unet_state_
 from diffusers.utils.torch_utils import is_compiled_module
 from compel import Compel, ReturnedEmbeddingsType
 
+import random
 import s_random
 from common import clean, 生成optimizer, 哈, 哈哈, encode_prompt, compute_time_ids, 检查模型类型, 计时, buffered_iterator, add_image_jpeg, cosine_with_restart_scheduler改, 注入cl
 from data import 读取数据集
 
 
-def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet, torch_dtype, trackers, pretrained_model_name_or_path, validation_prompt_list, current_model_index):
+def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet, torch_dtype, trackers, pretrained_model_name_or_path, validation_prompt_list, current_model_index, validation_infer_steps, validation_infer_cfg, benchmarker_n_iter: int):
     if accelerator.is_main_process:
         import httpx
         import requests
@@ -61,8 +62,8 @@ def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet
                 pipeline(
                     prompt=prompt,
                     generator=torch.Generator(device=accelerator.device).manual_seed(100+i),
-                    num_inference_steps=20,
-                    guidance_scale=7,
+                    num_inference_steps=validation_infer_steps,
+                    guidance_scale=validation_infer_cfg,
                     width=768,
                     height=1024,
                 ).images[0] for i, prompt in enumerate(validation_prompt_list)
@@ -72,6 +73,31 @@ def validation(global_step, accelerator, vae, text_encoder, text_encoder_2, unet
             for tracker in trackers:
                 if tracker.name == "tensorboard":
                     add_image_jpeg(tracker.writer, "validation", np.concatenate([np.asarray(img) for img in images], axis=1), global_step)
+
+            if benchmarker_n_iter:
+                from benchmarker.common import 要测的标签, ml_danbooru标签2
+                rd = random.Random(1)
+                所有得分 = []
+                for seed in tqdm(range(benchmarker_n_iter), ncols=60, desc='tags'):
+                    标签组 = rd.sample(要测的标签, rd.randint(15, 20))
+                    标签组 = [i.strip() for i in 标签组]
+                    下划线标签组 = [i.strip().replace(' ', '_') for i in 标签组]
+                    画师 = ['', 'as109', 'fuzichoco', 'muririn', 'chen bin'][seed % 5]
+                    a = ['1girl'] + 标签组 + [画师]
+                    a = [i for i in a if i]
+                    images = pipeline(
+                        prompt=", ".join(a),
+                        generator=torch.Generator(device=accelerator.device).manual_seed(seed),
+                        num_inference_steps=validation_infer_steps,
+                        guidance_scale=validation_infer_cfg,
+                        width=704+rd.randint(0, 5)*64,
+                        height=704+rd.randint(0, 5)*64,
+                    ).images
+                    预测标签 = ml_danbooru标签2(images)[0]
+                    得分 = len(set(下划线标签组) & set(预测标签)) / len(set(下划线标签组))
+                    所有得分.append(得分)
+                分数 = sum(所有得分) / len(所有得分)
+                accelerator.log({'tag分数': 分数}, step=global_step)
 
 
 def 加载模型(path) -> tuple:
@@ -100,7 +126,7 @@ def 相位转移(model, state_dict):
     model.load_state_dict(dd, strict=False)
 
 
-def conditional_loss(model_pred: torch.Tensor, target: torch.Tensor, reduction: str = "mean", loss_type: str = "l2", huber_c: float = 0.1,):
+def conditional_loss(model_pred: Tensor, target: Tensor, reduction: str = "mean", loss_type: str = "l2", huber_c: float = 0.1):
     if loss_type == "l2":
         loss = F.mse_loss(model_pred, target, reduction=reduction)
     elif loss_type == "huber" or loss_type == "huber_scheduled":
@@ -114,7 +140,122 @@ def conditional_loss(model_pred: torch.Tensor, target: torch.Tensor, reduction: 
     return loss
 
 
-def vae_encode_with_cache(vae, pixel_values, cache_dir, 哈希值) -> torch.Tensor:
+def 计算loss(方法, noise: Tensor, loss_type: str = "l2", huber_c: float = 0.1, *, unet, noisy_model_input, timesteps, prompt_embeds, unet_added_conditions, noise_scheduler, x0, accelerator, global_step, rectify_steps=4, rectify_cfg=7):
+    if 方法 in ('正常', 'prior'):
+        with 计时(accelerator, global_step, '正向', sync=True):
+            model_pred = unet(
+                noisy_model_input,
+                timesteps,
+                prompt_embeds,
+                added_cond_kwargs=unet_added_conditions,
+                return_dict=False,
+            )[0]
+    if 方法 == '正常':
+        return conditional_loss(model_pred.float(), noise.float(), reduction="none", loss_type=loss_type, huber_c=huber_c)
+    elif 方法 == 'prior':
+        with torch.inference_mode():
+            unet.disable_adapters()
+            原model_pred = unet(
+                noisy_model_input,
+                timesteps,
+                prompt_embeds,
+                added_cond_kwargs=unet_added_conditions,
+                return_dict=False,
+            )[0]
+            unet.enable_adapters()
+        return conditional_loss(model_pred.float(), 原model_pred.detach().clone().float(), reduction="none", loss_type=loss_type, huber_c=huber_c)
+    elif 方法 == 'rectify':
+        device = noisy_model_input.device
+        dtype = unet.dtype
+        bsz = noisy_model_input.shape[0]
+        步数倍率 = 10
+        目标步数 = rectify_steps
+        总步数 = 目标步数 * 步数倍率
+        teacher_scheduler = DPMSolverMultistepScheduler.from_config(noise_scheduler.config)
+        teacher_scheduler.set_timesteps(总步数)
+        full_ts = teacher_scheduler.timesteps.to(device)
+
+        段位 = random.randint(0, 目标步数 - 1)
+        start_idx = 段位 * 步数倍率
+        start_timesteps = full_ts[start_idx].repeat(bsz)
+        if 段位 < 目标步数 - 1:
+            sub_ts = full_ts[start_idx: start_idx + 步数倍率 + 1]
+            end_timesteps = full_ts[start_idx + 步数倍率].repeat(bsz)
+        else:
+            sub_ts = full_ts[start_idx: start_idx + 步数倍率]
+            end_timesteps = torch.zeros(bsz, dtype=torch.long, device=device)
+
+        noisy_start = noise_scheduler.add_noise(x0, noise, start_timesteps)
+
+        with 计时(accelerator, global_step, 'rectify推理', sync=True):
+            with torch.inference_mode():
+                unet.disable_adapters()
+                pipe = StableDiffusionXLPipeline(
+                    vae=None, text_encoder=None, text_encoder_2=None,
+                    tokenizer=None, tokenizer_2=None,
+                    unet=unet, scheduler=teacher_scheduler,
+                )
+                pipe.set_progress_bar_config(disable=True)
+
+                def step_callback(p, step_idx, t, kw):
+                    if step_idx >= 步数倍率 - 1:
+                        p._interrupt = True
+                    return kw
+
+                h, w = noisy_start.shape[-2:]
+                x_prev = pipe(
+                    latents=noisy_start,
+                    prompt_embeds=prompt_embeds,
+                    pooled_prompt_embeds=unet_added_conditions['text_embeds'],
+                    timesteps=sub_ts.tolist(),
+                    callback_on_step_end=step_callback,
+                    guidance_scale=rectify_cfg,
+                    original_size=(h * 8, w * 8),
+                    target_size=(h * 8, w * 8),
+                    output_type='latent',
+                ).images.to(dtype=dtype)
+                unet.enable_adapters()
+
+        alpha_sched = torch.sqrt(noise_scheduler.alphas_cumprod).to(device)
+        sigma_sched = torch.sqrt(1 - noise_scheduler.alphas_cumprod).to(device)
+
+        start_a = alpha_sched[start_timesteps].view(-1, 1, 1, 1)
+        start_s = sigma_sched[start_timesteps].view(-1, 1, 1, 1)
+        start_nsr = start_s / start_a
+
+        end_a = alpha_sched[end_timesteps].view(-1, 1, 1, 1)
+        end_s = sigma_sched[end_timesteps].view(-1, 1, 1, 1)
+        end_nsr = end_s / end_a
+
+        sampled_timesteps = torch.empty(bsz, dtype=torch.long, device=device)
+        for i in range(bsz):
+            diff = (start_timesteps[i] - end_timesteps[i]).item()
+            if diff > 1:
+                sampled_timesteps[i] = end_timesteps[i] + torch.randint(1, diff, (1,), device=device)
+            else:
+                sampled_timesteps[i] = end_timesteps[i]
+
+        sampled_a = alpha_sched[sampled_timesteps].view(-1, 1, 1, 1)
+        sampled_s = sigma_sched[sampled_timesteps].view(-1, 1, 1, 1)
+        sampled_nsr = sampled_s / sampled_a
+
+        noise_flow = ((x_prev / end_a) - (noisy_start / start_a)) / (end_nsr - start_nsr)
+        sampled_x = ((noisy_start / start_a) + (sampled_nsr - start_nsr) * noise_flow) * sampled_a
+
+        student_output = unet(
+            sampled_x.to(dtype),
+            sampled_timesteps,
+            prompt_embeds,
+            added_cond_kwargs=unet_added_conditions,
+            return_dict=False,
+        )[0]
+        pred_target = (sampled_x / sampled_a + (end_nsr - sampled_nsr) * student_output) * end_a
+        return conditional_loss(pred_target.float(), x_prev.float(), reduction="none", loss_type=loss_type, huber_c=huber_c)
+    else:
+        raise NotImplementedError
+
+
+def vae_encode_with_cache(vae, pixel_values, cache_dir, 哈希值) -> Tensor:
     p = Path(cache_dir) / f'{哈希值}.pkl'
     if p.exists():
         return pickle.load(open(p, 'rb'))
@@ -128,11 +269,14 @@ def main(
     pretrained_model_name_or_path: str | list[str],
     train_data_dir: str | list[str],
     validation_prompt_list: str | list[str] = '1girl',
+    validation_infer_steps: int = 20,
+    validation_infer_cfg: float = 7.0,
     prior_loss_train_data_dir: str | list[str] = None,
     cache_dir: str = './rimo_lora_lab_cache',
-    validation_steps: int = 100,
+    validation_interval: int = 100,
     prior_loss_rate: float = 0.125,
     output_dir: str = "lora",
+    logging_dir: str = None,
     seed: int = None,
     batch_size: int = 1,
     max_train_steps: int = 10000,
@@ -151,7 +295,6 @@ def main(
     adam_weight_decay: float = 0.1,
     adam_epsilon: float = 1e-8,
     max_grad_norm: float = 1.0,
-    prediction_type: str = None,
     mixed_precision: str = None,
     loss_type: str = "l2",
     huber_c: float = 0.1,
@@ -169,8 +312,11 @@ def main(
     resume_from_checkpoint: str = 'latest',
     use_mask: bool = False,
     mask_min: float = 0.1,
-    noise_candidates: int = 1,
     use_compile: bool = False,
+    rectify=False,
+    rectify_steps=4,
+    rectify_cfg=7,
+    benchmarker_n_iter=0,
 ):
     alpha = alpha or rank // 2
     if seed is None:
@@ -178,11 +324,13 @@ def main(
     metadata = {k: v for k, v in locals().items() if isinstance(v, (float, int, str, list, tuple)) and not k.startswith('_')}
     metadata['torch_version'] = torch.__version__
     metadata['device_name'] = torch.cuda.get_device_name()
+    if logging_dir is None:
+        logging_dir = os.path.join(output_dir, 'logs')
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
         log_with='tensorboard',
-        project_config=ProjectConfiguration(project_dir=output_dir, logging_dir=os.path.join(output_dir, 'logs')),
+        project_config=ProjectConfiguration(project_dir=output_dir, logging_dir=logging_dir),
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)],
     )
     set_seed(seed)
@@ -194,6 +342,8 @@ def main(
         train_data_dir = train_data_dir.split(';')
     if isinstance(prior_loss_train_data_dir, str):
         prior_loss_train_data_dir = prior_loss_train_data_dir.split(';')
+    if rectify:
+        assert not prior_loss_train_data_dir, '蒸馏不应该有先验损失'
     if isinstance(balance_tags, str):
         balance_tags = balance_tags.split(';') if ';' in balance_tags else balance_tags.split(',')
     if accelerator.is_main_process:
@@ -206,7 +356,7 @@ def main(
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', mixed_precision, lr_scheduler, f'{round(lr_cosine_min, 3)}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{round(mask_min, 3)}' * use_mask, f'nc{noise_candidates}' * (noise_candidates > 1), f'均{balance_rate}_{哈(balance_tags)}' if (balance_tags and balance_rate) else '', seed]
+    特 = [哈哈(train_data_dir), 哈哈(pretrained_model_name_or_path), f'{哈哈(prior_loss_train_data_dir)}_p{prior_loss_rate}' if prior_loss_train_data_dir else '', optimizer, f'snr{snr_gamma}', f'lr{lr}', mixed_precision, lr_scheduler, f'{round(lr_cosine_min, 3)}' * (lr_scheduler == 'cosine_with_restarts'), f'lora{rank}_{alpha}', f'time{time_min}_{time_max}', f'size{size_min}_{size_max}', f'decay{adam_weight_decay}', 哈(prompt_post_process), 哈(prior_loss_prompt_post_process), f'mask{round(mask_min, 3)}' * use_mask, f'均{balance_rate}_{哈(balance_tags)}' if (balance_tags and balance_rate) else '', seed, f're_{rectify_steps}_{rectify_cfg}' if rectify else '']
     特征 = '-'.join([str(i) for i in 特 if i != ''])
 
     if os.path.isdir(os.path.join(output_dir, 特征, f'checkpoint-{max_train_steps}')):
@@ -346,7 +496,7 @@ def main(
     )
 
     源 = buffered_iterator(itertools.chain.from_iterable(zip(*[
-        读取数据集(i, size_min=size_min, size_max=size_max, balance_tags=balance_tags, balance_rate=balance_rate, prompt_post_process=prompt_post_process, use_mask=use_mask, seed=seed+1)
+        读取数据集(i, size_min=size_min, size_max=size_max, balance_tags=balance_tags, balance_rate=balance_rate, prompt_post_process=prompt_post_process, use_mask=use_mask, seed=seed+1, 替换画师概率=0.5*rectify)
         for i in train_data_dir
     ])))
     if prior_loss_train_data_dir:
@@ -363,7 +513,7 @@ def main(
                 相位转移(unet, unet_state_dicts[current_model_index])
                 相位转移(text_encoder_one, te1_state_dicts[current_model_index])
                 相位转移(text_encoder_two, te2_state_dicts[current_model_index])
-        在训练正则化 = bool(prior_loss_train_data_dir and s_random.random('正则化') < prior_loss_rate)
+        在训练正则化 = bool(not rectify and prior_loss_train_data_dir and s_random.random('正则化') < prior_loss_rate)
         with 计时(accelerator, global_step, '取数据'):
             if 在训练正则化:
                 batch = next(源p)
@@ -371,7 +521,7 @@ def main(
                 batch = next(源)
         try:
             with 计时(accelerator, global_step, 'VAE', sync=True):
-                model_input = vae_encode_with_cache(vae, batch["pixel_values"], cache_dir, batch["image_hash"]).to(weight_dtype)
+                x0 = vae_encode_with_cache(vae, batch["pixel_values"], cache_dir, batch["image_hash"]).to(weight_dtype)
             with 计时(accelerator, global_step, 'TE', sync=True):
                 prompt_embeds, pooled_prompt_embeds = encode_prompt(batch['prompts'], compel)
         except Exception:
@@ -382,84 +532,35 @@ def main(
                 print('\n'.join(['-'*9, f'{在训练正则化=}', '【原本】', batch['raw_prompts'][0], '【改后】', batch['prompts'][0]]), file=f)
         with accelerator.accumulate(unet), 计时(accelerator, global_step, '全', sync=True):
             h, w = batch['pixel_values'].shape[2:]
-            if noise_candidates > 1:    # 这个分支似乎并不会加速收敛，并且开到100以上的话，推理结果会变灰，后面考虑去掉了
-                k = max(1, round(noise_candidates * 0.27))
-                候选 = torch.randn(noise_candidates, *model_input.shape, device=model_input.device, dtype=model_input.dtype)
-                距离 = (候选 - model_input).flatten(2).norm(dim=-1)
-                idx = 距离.argsort(dim=0)[:k]
-                noise = 候选.gather(0, idx.view(k, -1, 1, 1, 1).expand(-1, *model_input.shape)).sum(0)
-                noise = (noise - noise.mean(dim=(1, 2, 3), keepdim=True)) / noise.std(dim=(1, 2, 3), keepdim=True)
-            else:
-                noise = torch.randn_like(model_input)
-            bsz = model_input.shape[0]
+            noise = torch.randn_like(x0)
+            bsz = x0.shape[0]
             if 在训练正则化:
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=x0.device)
             else:
-                timesteps = torch.randint(time_min, time_max, (bsz,), device=model_input.device).long()
+                timesteps = torch.randint(time_min, time_max, (bsz,), device=x0.device).long()
 
-            noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps)    # 100接近model_input，800接近noise
+            noisy_model_input = noise_scheduler.add_noise(x0, noise, timesteps)    # 100接近x0，800接近noise
             add_time_ids = torch.cat([compute_time_ids(s, r, c) for s, r, c in zip([(h, w)], [(h, w)], [(0, 0)])]).to('cuda')
             unet_added_conditions = {"time_ids": add_time_ids}
             unet_added_conditions.update({"text_embeds": pooled_prompt_embeds})
 
-            with 计时(accelerator, global_step, '正向', sync=True):
-                model_pred = unet(
-                    noisy_model_input,
-                    timesteps,
-                    prompt_embeds,
-                    added_cond_kwargs=unet_added_conditions,
-                    return_dict=False,
-                )[0]
+            assert snr_gamma is None
+            assert noise_scheduler.config.prediction_type == "epsilon"
 
-            if 在训练正则化:
-                with torch.inference_mode():
-                    unet.disable_adapters()
-                    原model_pred = unet(
-                        noisy_model_input,
-                        timesteps,
-                        prompt_embeds,
-                        added_cond_kwargs=unet_added_conditions,
-                        return_dict=False,
-                    )[0]
-                    unet.enable_adapters()
-                    target = 原model_pred.detach().clone()
+            if rectify:
+                方法 = 'rectify'
+            elif 在训练正则化:
+                方法 = 'prior'
             else:
-                if prediction_type is not None:
-                    noise_scheduler.register_to_config(prediction_type=prediction_type)
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    target = noise
-                elif noise_scheduler.config.prediction_type == "v_prediction":
-                    target = noise_scheduler.get_velocity(model_input, noise, timesteps)
-                else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                方法 = '正常'
+            loss = 计算loss(方法, noise=noise, loss_type=loss_type, huber_c=huber_c, unet=unet, noisy_model_input=noisy_model_input, timesteps=timesteps, prompt_embeds=prompt_embeds, unet_added_conditions=unet_added_conditions, noise_scheduler=noise_scheduler, x0=x0, accelerator=accelerator, global_step=global_step, rectify_cfg=rectify_cfg, rectify_steps=rectify_steps)
 
-            if snr_gamma is None:
-                loss = conditional_loss(
-                    model_pred.float(), target.float(), reduction="none", loss_type=loss_type, huber_c=huber_c
-                )
-                if use_mask and batch.get('pixel_values_mask') is not None:
-                    x, y = batch["pixel_values_mask"].shape[-2:]
-                    mask = F.interpolate(batch['pixel_values_mask'].to(accelerator.device, dtype=torch.float32), size=(x//8, y//8))
-                    mask = mask * (1 - mask_min) + mask_min
-                    loss = loss * mask
-            else:
-                # Compute loss-weights as per Section 3.4 of https://huggingface.co/papers/2303.09556.
-                # Since we predict the noise instead of x_0, the original formulation is slightly changed.
-                # This is discussed in Section 4.2 of the same paper.
-                snr = compute_snr(noise_scheduler, timesteps)
-                mse_loss_weights = torch.stack([snr, snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    mse_loss_weights = mse_loss_weights / snr
-                elif noise_scheduler.config.prediction_type == "v_prediction":
-                    mse_loss_weights = mse_loss_weights / (snr + 1)
-                loss = conditional_loss(
-                    model_pred.float(), target.float(), reduction="none", loss_type=loss_type, huber_c=huber_c
-                )
-                if use_mask and batch.get('pixel_values_mask') is not None:
-                    mask = F.interpolate(batch['pixel_values_mask'].to(accelerator.device, dtype=torch.float32), size=model_pred.shape[-2:])
-                    mask = mask * (1 - mask_min) + mask_min
-                    loss = loss * mask
-                loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
+            if use_mask and batch.get('pixel_values_mask') is not None:
+                x, y = batch["pixel_values_mask"].shape[-2:]
+                mask = F.interpolate(batch['pixel_values_mask'].to(accelerator.device, dtype=torch.float32), size=(x//8, y//8))
+                mask = mask * (1 - mask_min) + mask_min
+                loss = loss * mask
+
             loss = loss.mean()
             if global_step < 100 and accelerator.is_main_process:
                 with open(f'{checkpoint_dir}/loss_log.txt', 'a', encoding='utf8') as f:
@@ -474,7 +575,7 @@ def main(
                 optimizer.zero_grad()
 
         if accelerator.sync_gradients:
-            if validation_steps and global_step % validation_steps == 0 or global_step in [checkpointing_steps//2, checkpointing_steps//4]:
+            if validation_interval and global_step % validation_interval == 0 or global_step in [validation_interval//2, validation_interval//4]:
                 with 计时(accelerator, global_step, 'validation', sync=True):
                     validation(
                         accelerator=accelerator,
@@ -487,7 +588,10 @@ def main(
                         global_step=global_step,
                         pretrained_model_name_or_path=pretrained_model_name_or_path[0],
                         validation_prompt_list=validation_prompt_list,
+                        validation_infer_steps=validation_infer_steps,
+                        validation_infer_cfg=validation_infer_cfg,
                         current_model_index=current_model_index,
+                        benchmarker_n_iter=benchmarker_n_iter,
                     )
             前缀 = '正则化' * 在训练正则化
             logs = {f"{前缀}loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], f"{前缀}grad_norm": grad_norm.item(), f"{前缀}t": timesteps[0]}

@@ -39,16 +39,22 @@ def _balance_drop_rate(s: str, tag次数: dict, balance_rate: str) -> float:
         return (1 - min(tag次数.values()) / min(tag次数[tag] for tag in 包含tags)) * balance_rate
     return 0
 
-def _read(txt_path: Path, r) -> str:
+def _read(txt_path: Path, r, 替换画师概率: float) -> str:
     s = txt_path.read_text(encoding='utf-8')
     if txt_path.suffix == '.json':
         d = json.loads(s)
         q, w = _分离人数标签(d['tag_string_general'].split(' '))
         r.shuffle(w)
+        if r.random() < 替换画师概率:
+            d['tag_string_artist'] = r.choice(_好画师)
         s = _置换(' '.join([*q, d['tag_string_character'], *w, d['tag_string_artist']]))
     return s
 
-def 读取数据集(p: str, *, size_min, size_max, balance_tags=None, balance_rate=1.0, image_exts={'.jpg', '.jpeg', '.png', '.bmp', '.webp'}, prompt_post_process='', use_mask=False, seed=1, ep=10**8):
+
+_好画师: list = json.load(open(Path(__file__)/'../赠品/好画师.json'))
+
+
+def 读取数据集(p: str, *, size_min, size_max, balance_tags=None, balance_rate=1.0, image_exts={'.jpg', '.jpeg', '.png', '.bmp', '.webp'}, prompt_post_process='', use_mask=False, seed=1, ep=10**8, 替换画师概率=0):
     r = random.Random(seed)
 
     def 处理图片(img, mask=None):
@@ -94,7 +100,7 @@ def 读取数据集(p: str, *, size_min, size_max, balance_tags=None, balance_ra
         r.shuffle(a)
         for item in a:
             img_path, txt_path = item[0], item[1]
-            s = _read(txt_path, r)
+            s = _read(txt_path, r, 替换画师概率)
             if balance_tags:
                 if r.random() < _balance_drop_rate(s, tag次数, balance_rate):
                     continue

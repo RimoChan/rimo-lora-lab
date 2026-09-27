@@ -1,3 +1,4 @@
+import json
 import torch
 from safetensors.torch import load_file, save_file
 from diffusers.utils import convert_all_state_dict_to_peft, convert_state_dict_to_kohya
@@ -17,4 +18,4 @@ def 转换格式(input_lora, output_lora, alpha, metadata={}):
 
 # metadata = json.load(open(f'{名字}/metadata.json', encoding='utf8'))
 # alpha = metadata['alpha']
-# convert_and_save(f'{名字}/checkpoint-6000/pytorch_lora_weights.safetensors', f'R:/stable-diffusion-webui-master/models/Lora/my_lora.safetensors', alpha, metadata)
+# 转换格式(f'{名字}/checkpoint-6000/pytorch_lora_weights.safetensors', f'R:/stable-diffusion-webui-master/models/Lora/my_lora.safetensors', alpha, metadata)
